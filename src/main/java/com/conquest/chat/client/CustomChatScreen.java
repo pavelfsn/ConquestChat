@@ -44,18 +44,16 @@ public class CustomChatScreen extends ChatScreen {
         int y = this.height - chatHeight - 4;
 
         this.input.setX(x + 4);
-        this.input.setY(y + chatHeight - 14);
+        this.input.setY(y + chatHeight - 13);
         this.input.setWidth(chatWidth - 8);
         this.input.setBordered(false);
         this.input.setMaxLength(256);
         this.input.setTextColor(0xFFFFFFFF);
 
-        // Включаем подсказки
         this.commandSuggestions = new CommandSuggestions(this.minecraft, this, this.input, this.font, false, false, 0, 10, false, -805306368);
         this.commandSuggestions.setAllowSuggestions(true);
         this.commandSuggestions.updateCommandInfo();
 
-        // Логика авто-вставки @
         if (currentTab.equals("Личное") && (this.input.getValue().isEmpty() || this.input.getValue().equals("/"))) {
             this.input.setValue("@");
             this.input.setCursorPosition(1);
@@ -79,7 +77,7 @@ public class CustomChatScreen extends ChatScreen {
         this.animationAlpha = duration > 0 ? Mth.clamp(elapsed / duration, 0.0f, 1.0f) : 1.0f;
 
         int bgColor = 0xFF000000;
-        int bgAlpha = 200; // Чуть темнее фон (200/255)
+        int bgAlpha = 200;
         int finalBgColor = ((int)(bgAlpha * animationAlpha) << 24) | (bgColor & 0x00FFFFFF);
 
         int width = ChatConfig.CLIENT.chatWidth.get();
@@ -88,40 +86,42 @@ public class CustomChatScreen extends ChatScreen {
         int y = this.height - height - 4;
 
         graphics.fill(x, y, x + width, y + height, finalBgColor);
-        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0xAA000000); // Хедер еще темнее
+        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0xAA000000);
 
         renderTabs(graphics, mouseX, mouseY, x, y, width);
-        renderMessages(graphics, mouseX, mouseY, x, y + TAB_HEIGHT + 4, width, height - TAB_HEIGHT - 18);
-        renderSettingsButton(graphics, mouseX, mouseY, x + 4, y + 4);
+        renderMessages(graphics, mouseX, mouseY, x, y + TAB_HEIGHT + 2, width, height - TAB_HEIGHT - 16);
 
-        int inputLineY = y + height - 16;
-        graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
+        renderSettingsButton(graphics, mouseX, mouseY, x, y);
 
-        RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
-        this.input.render(graphics, mouseX, mouseY, partialTick);
-        this.commandSuggestions.render(graphics, mouseX, mouseY);
+        // Рендерим поле ввода только если это НЕ "Урон"
+        if (!currentTab.equals("Урон")) {
+            int inputLineY = y + height - 16;
+            graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
+
+            RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
+            this.input.render(graphics, mouseX, mouseY, partialTick);
+            this.commandSuggestions.render(graphics, mouseX, mouseY);
+        } else {
+            graphics.drawString(this.font, "Только чтение", x + 4, y + height - 12, 0xFFAAAAAA, false);
+        }
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
     }
 
     private void renderTabs(GuiGraphics graphics, int mouseX, int mouseY, int x, int y, int width) {
-        String[] tabs = {"Общий", "Торг", "Личное", "Урон", "+"};
+        String[] tabs = {"Общий", "Торг", "Личное", "Урон"};
         int tabX = x + 24;
-        int tabPadding = 8; // Чуть больше отступ
+        int tabPadding = 8;
 
         for (String tab : tabs) {
             int textWidth = this.font.width(tab);
             boolean isActive = tab.equals(currentTab);
-
-            // Цвет текста: Активный = Белый (FFFFFFFF), Неактивный = Серый (FFAAAAAA)
             int color = isActive ? 0xFFFFFFFF : 0xFFAAAAAA;
 
             graphics.drawString(this.font, Component.literal(tab), tabX, y + 4, color, false);
 
-            // Подчеркивание для активной вкладки
             if (isActive) {
                 graphics.fill(tabX, y + TAB_HEIGHT - 2, tabX + textWidth, y + TAB_HEIGHT - 1, 0xFFFFFFFF);
             }
-
             tabX += textWidth + tabPadding * 2;
         }
     }
@@ -132,6 +132,7 @@ public class CustomChatScreen extends ChatScreen {
 
         List<FormattedCharSequence> wrappedLines = new ArrayList<>();
         int maxTextWidth = width - 12;
+
         for (Component msg : rawMessages) {
             wrappedLines.addAll(this.font.split(msg, maxTextWidth));
         }
@@ -140,7 +141,6 @@ public class CustomChatScreen extends ChatScreen {
         int visibleLines = height / lineHeight;
         int totalLines = wrappedLines.size();
 
-        // ФИКС СКРОЛЛА: Не даем уйти в минус
         if (scrollOffset < 0) scrollOffset = 0;
         int maxScroll = Math.max(0, totalLines - visibleLines);
         if (scrollOffset > maxScroll) scrollOffset = maxScroll;
@@ -159,26 +159,35 @@ public class CustomChatScreen extends ChatScreen {
         if (totalLines > visibleLines) {
             int scrollH = Math.max(10, (int)((float)visibleLines / totalLines * height));
             float scrollP = (float)scrollOffset / (totalLines - visibleLines);
-            int scrollY = y + height - scrollH - (int)(scrollP * (height - scrollH));
+            int scrollY = y + height - scrollH - (int)(scrollP * (height - scrollH)) - 1;
 
             graphics.fill(x, scrollY, x + SCROLLBAR_WIDTH, scrollY + scrollH, 0xFFFFFFFF);
         }
     }
 
+    // --- Сдвинуто на +4 px ---
     private void renderSettingsButton(GuiGraphics graphics, int mouseX, int mouseY, int x, int y) {
-        graphics.drawString(this.font, Component.literal("⚙"), x + 4, y + 4, 0xFFAAAAAA, false);
+        graphics.drawString(this.font, Component.literal("⚙"), x + 4, y + 3, 0xFFAAAAAA, false);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (this.commandSuggestions.mouseClicked(mouseX, mouseY, button)) return true;
 
-        if (button == 0) {
-            int width = ChatConfig.CLIENT.chatWidth.get();
-            int height = ChatConfig.CLIENT.chatHeight.get();
-            int x = 4;
-            int y = this.height - height - 4;
+        int width = ChatConfig.CLIENT.chatWidth.get();
+        int height = ChatConfig.CLIENT.chatHeight.get();
+        int x = 4;
+        int y = this.height - height - 4;
 
+        if (button == 0) {
+            // Клик по настройкам (x+4, y+3)
+            if (mouseX >= x + 4 && mouseX <= x + 12 && mouseY >= y + 3 && mouseY <= y + 11) {
+                // TODO: Открыть конфиг
+                System.out.println("Settings clicked");
+                return true;
+            }
+
+            // Клик по табам
             if (mouseY >= y && mouseY < y + TAB_HEIGHT && mouseX >= x && mouseX < x + width) {
                 String[] tabs = {"Общий", "Торг", "Личное", "Урон"};
                 int tabX = x + 24;
@@ -190,9 +199,7 @@ public class CustomChatScreen extends ChatScreen {
                             this.currentTab = tab;
                             this.scrollOffset = 0;
                             this.input.setValue("");
-                            if (tab.equals("Личное")) {
-                                this.input.setValue("@");
-                            }
+                            if (tab.equals("Личное")) this.input.setValue("@");
                         }
                         return true;
                     }
@@ -201,17 +208,16 @@ public class CustomChatScreen extends ChatScreen {
             }
         }
 
-        if (this.input.mouseClicked(mouseX, mouseY, button)) return true;
+        // Запрещаем клик в поле ввода, если вкладка "Урон"
+        if (currentTab.equals("Урон")) return true;
 
+        if (this.input.mouseClicked(mouseX, mouseY, button)) return true;
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        // TAB FIX: Если подсказки обработали нажатие, возвращаем true
-        if (this.commandSuggestions.keyPressed(keyCode, scanCode, modifiers)) {
-            return true;
-        }
+        if (this.commandSuggestions.keyPressed(keyCode, scanCode, modifiers)) return true;
 
         if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             String text = this.input.getValue().trim();
@@ -219,20 +225,20 @@ public class CustomChatScreen extends ChatScreen {
                 sendMessageByTab(text);
                 this.minecraft.gui.getChat().addRecentChat(text);
                 this.input.setValue(currentTab.equals("Личное") ? "@" : "");
-                if (!currentTab.equals("Личное")) {
-                    this.minecraft.setScreen(null);
-                }
+                if (!currentTab.equals("Личное")) this.minecraft.setScreen(null);
             } else {
                 this.minecraft.setScreen(null);
             }
             return true;
         }
-
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     private void sendMessageByTab(String text) {
         if (currentTab.equals("Торг")) {
+            // Отправляем как есть, если игрок сам не написал [Торг], префикс добавится в ClientChatManager при отображении,
+            // но для сервера лучше отправить чистое сообщение или команду глобального чата (если есть, например /g).
+            // Если на сервере просто чат:
             this.minecraft.getConnection().sendChat("[Торг] " + text);
         } else if (currentTab.equals("Личное")) {
             if (text.startsWith("@") && text.contains(" ")) {
@@ -253,11 +259,7 @@ public class CustomChatScreen extends ChatScreen {
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
         if (delta != 0) {
-            // ФИКС СКРОЛЛА: Инверсия и границы
-            // delta > 0 (колесико вверх) -> видим более старые сообщения (offset увеличивается)
             this.scrollOffset += (delta > 0) ? 1 : -1;
-
-            // Границы проверяются в render(), но лучше и здесь
             if (this.scrollOffset < 0) this.scrollOffset = 0;
             return true;
         }

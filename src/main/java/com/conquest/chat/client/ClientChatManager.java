@@ -2,9 +2,10 @@ package com.conquest.chat.client;
 
 import com.conquest.chat.enums.ChatChannel;
 import com.conquest.chat.enums.ChatMessageType;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.Style;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -22,12 +23,9 @@ public class ClientChatManager {
     private ChatChannel activeTab = ChatChannel.ALL;
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    // Паттерны для перехвата стандартных сообщений (если сервер шлет их текстом)
-    // Пример: "[COMBAT] Вы нанесли 0.9 урона по Слизень"
+    // Regex для урона
     private static final Pattern DAMAGE_DEALT_PATTERN = Pattern.compile("Вы нанесли ([0-9.]+) урона по (.+)");
-    private static final Pattern DAMAGE_TAKEN_PATTERN = Pattern.compile("Вы получили ([0-9.]+) урона от (.+)");
     private static final Pattern KILL_PATTERN = Pattern.compile("Вы убили (.+)");
-    private static final Pattern KILLED_BY_PATTERN = Pattern.compile("Вас убил (.+)");
 
     private ClientChatManager() {
         for (ChatChannel channel : ChatChannel.values()) {
@@ -43,57 +41,92 @@ public class ClientChatManager {
     }
 
     public void addMessage(ChatMessageType type, Component originalMessage) {
-        ChatChannel target = mapTypeToChannel(type);
-        Component finalMessage = originalMessage;
+        String originalText = originalMessage.getString();
 
-        // Если это боевой чат, пытаемся переформатировать
-        if (target == ChatChannel.COMBAT) {
-            finalMessage = reformatCombatMessage(originalMessage);
+        // --- 1. ОПРЕДЕЛЕНИЕ КАНАЛА И ТИПА (Парсинг) ---
+        ChatChannel detectedChannel = ChatChannel.ALL;
+        ChatFormatting color = ChatFormatting.WHITE;
+        String prefix = "";
+
+        // Логика определения типа сообщения
+        if (type == ChatMessageType.COMBAT || originalText.startsWith("[COMBAT]") || DAMAGE_DEALT_PATTERN.matcher(originalText).find()) {
+            detectedChannel = ChatChannel.COMBAT;
+        } else if (originalText.contains("[Торг]") || type == ChatMessageType.TRADE) {
+            detectedChannel = ChatChannel.TRADE;
+            color = ChatFormatting.BLUE; // &9
+            // Если префикса еще нет в тексте (например, мы сами отправляем), добавим его визуально
+            if (!originalText.contains("[Торг]")) prefix = "[Торг] ";
+        } else if (originalText.contains("шепчет") || originalText.contains("прошептали") || type == ChatMessageType.WHISPER) {
+            detectedChannel = ChatChannel.WHISPER;
+            color = ChatFormatting.DARK_PURPLE; // &5
+            if (!originalText.contains("[Личное]")) prefix = "[Личное] ";
         } else {
-            // Для остальных добавляем время [HH:mm:ss] [Вкладка] [Игрок]: msg
-            // Сложно распарсить "Игрока" из Component, если он там жестко зашит.
-            // Поэтому просто добавляем время.
-            String time = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
-            finalMessage = Component.literal(time).append(originalMessage);
+            // Обычное сообщение
+            detectedChannel = ChatChannel.ALL;
+            color = ChatFormatting.WHITE;
+            // Не добавляем префикс [Общий], если это просто чат, чтобы не захламлять
+            // prefix = "[Общий] ";
         }
 
-        // Дублируем в ALL
-        messages.computeIfAbsent(ChatChannel.ALL, k -> new ArrayList<>()).add(finalMessage);
+        // --- 2. ФОРМАТИРОВАНИЕ ---
+        Component finalMessage;
 
-        if (target != ChatChannel.ALL) {
-            messages.computeIfAbsent(target, k -> new ArrayList<>()).add(finalMessage);
+        // Создаем final переменную для использования в лямбде
+        final ChatFormatting finalColor = color;
+
+        if (detectedChannel == ChatChannel.COMBAT) {
+            finalMessage = reformatCombatMessage(originalMessage);
+        } else {
+            // Формируем: [HH:mm:ss] [Prefix] OriginalMessage (с цветом)
+            String time = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
+
+            MutableComponent timeComp = Component.literal(time).withStyle(ChatFormatting.GRAY);
+            MutableComponent prefixComp = Component.literal(prefix).withStyle(finalColor);
+
+            // Если сообщение уже имеет стиль, пытаемся его сохранить, иначе накладываем цвет канала
+            MutableComponent contentComp = originalMessage.copy().withStyle(style -> {
+                // Используем finalColor вместо color
+                if (style.getColor() == null) return style.applyFormat(finalColor);
+                return style;
+            });
+
+            finalMessage = timeComp.append(prefixComp).append(contentComp);
+        }
+
+        // --- 3. РАСПРЕДЕЛЕНИЕ ПО ТАБАМ ---
+
+        // Всегда добавляем в свой канал
+        messages.computeIfAbsent(detectedChannel, k -> new ArrayList<>()).add(finalMessage);
+
+        // Если это НЕ общий канал, дублируем в Общий (с сохранением цвета оригинала!)
+        if (detectedChannel != ChatChannel.ALL) {
+            messages.computeIfAbsent(ChatChannel.ALL, k -> new ArrayList<>()).add(finalMessage);
         }
 
         trimHistory(ChatChannel.ALL);
-        trimHistory(target);
+        trimHistory(detectedChannel);
     }
 
     private Component reformatCombatMessage(Component msg) {
-        String text = msg.getString(); // Получаем сырой текст без цветов
-        // Убираем префикс [COMBAT] если он есть в тексте
-        text = text.replace("[COMBAT] ", "").trim();
-
+        String text = msg.getString().replace("[COMBAT] ", "").trim();
         String time = LocalTime.now().format(TIME_FORMATTER);
-        String player = "Вы"; // Предполагаем "Вы", так как логи клиентоориентированные
 
         Matcher mDealt = DAMAGE_DEALT_PATTERN.matcher(text);
         if (mDealt.find()) {
             String dmg = mDealt.group(1);
             String entity = mDealt.group(2);
-            // [HH.MM.SS] [Урон. Исходящий] [Игрок]: Вы ранили [AnyEntity] (#.#)
-            String fmt = String.format("[%s] [Урон. Исходящий] [%s]: Вы ранили %s (%s)", time, player, entity, dmg);
-            return Component.literal(fmt).withStyle(ChatFormatting.GREEN);
+            String fmt = String.format("[%s] [Урон. Исходящий]: Вы ранили %s (%s)", time, entity, dmg);
+            return Component.literal(fmt).withStyle(ChatFormatting.RED);
         }
 
         Matcher mKill = KILL_PATTERN.matcher(text);
         if (mKill.find()) {
             String entity = mKill.group(1);
-            String fmt = String.format("[%s] [Урон. Исходящий] [%s]: Вы убили: %s", time, player, entity);
+            String fmt = String.format("[%s] [Урон. Исходящий]: Вы убили %s", time, entity);
             return Component.literal(fmt).withStyle(ChatFormatting.GOLD);
         }
 
-        // Возвращаем как есть, если не подошло, но с временем
-        return Component.literal("[" + time + "] " + text).withStyle(ChatFormatting.GRAY);
+        return Component.literal("[" + time + "] " + text).withStyle(ChatFormatting.RED);
     }
 
     private void trimHistory(ChatChannel channel) {
@@ -101,6 +134,7 @@ public class ClientChatManager {
         if (list != null && list.size() > 100) list.remove(0);
     }
 
+    // --- Геттеры и сеттеры ---
     public List<Component> getMessages(String channelName) {
         return getMessagesForTab(mapStringToChannel(channelName));
     }
@@ -110,11 +144,10 @@ public class ClientChatManager {
         return messages.getOrDefault(target, new ArrayList<>());
     }
 
-    // ... Маппинги (без изменений) ...
     private ChatChannel mapStringToChannel(String name) {
         switch (name) {
             case "Торг": return ChatChannel.TRADE;
-            case "Личное": return ChatChannel.WHISPER; // Переименовал
+            case "Личное": return ChatChannel.WHISPER;
             case "Урон": return ChatChannel.COMBAT;
             case "Общий": default: return ChatChannel.ALL;
         }
