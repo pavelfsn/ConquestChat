@@ -2,8 +2,9 @@ package com.conquest.chat.client;
 
 import com.conquest.chat.enums.ChatChannel;
 import com.conquest.chat.enums.ChatMessageType;
-import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.ChatFormatting;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -11,6 +12,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ClientChatManager {
 
@@ -18,6 +21,13 @@ public class ClientChatManager {
     private final Map<ChatChannel, List<Component>> messages = new HashMap<>();
     private ChatChannel activeTab = ChatChannel.ALL;
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    // Паттерны для перехвата стандартных сообщений (если сервер шлет их текстом)
+    // Пример: "[COMBAT] Вы нанесли 0.9 урона по Слизень"
+    private static final Pattern DAMAGE_DEALT_PATTERN = Pattern.compile("Вы нанесли ([0-9.]+) урона по (.+)");
+    private static final Pattern DAMAGE_TAKEN_PATTERN = Pattern.compile("Вы получили ([0-9.]+) урона от (.+)");
+    private static final Pattern KILL_PATTERN = Pattern.compile("Вы убили (.+)");
+    private static final Pattern KILLED_BY_PATTERN = Pattern.compile("Вас убил (.+)");
 
     private ClientChatManager() {
         for (ChatChannel channel : ChatChannel.values()) {
@@ -33,39 +43,57 @@ public class ClientChatManager {
     }
 
     public void addMessage(ChatMessageType type, Component originalMessage) {
-        // Форматирование времени: [HH:mm:ss]
-        String timeStamp = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
-        Component formatted = Component.literal(timeStamp).append(originalMessage);
-
-        // Фильтрация по каналам
-        messages.computeIfAbsent(ChatChannel.ALL, k -> new ArrayList<>()).add(formatted);
-
         ChatChannel target = mapTypeToChannel(type);
+        Component finalMessage = originalMessage;
+
+        // Если это боевой чат, пытаемся переформатировать
+        if (target == ChatChannel.COMBAT) {
+            finalMessage = reformatCombatMessage(originalMessage);
+        } else {
+            // Для остальных добавляем время [HH:mm:ss] [Вкладка] [Игрок]: msg
+            // Сложно распарсить "Игрока" из Component, если он там жестко зашит.
+            // Поэтому просто добавляем время.
+            String time = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
+            finalMessage = Component.literal(time).append(originalMessage);
+        }
+
+        // Дублируем в ALL
+        messages.computeIfAbsent(ChatChannel.ALL, k -> new ArrayList<>()).add(finalMessage);
+
         if (target != ChatChannel.ALL) {
-            messages.computeIfAbsent(target, k -> new ArrayList<>()).add(formatted);
+            messages.computeIfAbsent(target, k -> new ArrayList<>()).add(finalMessage);
         }
 
         trimHistory(ChatChannel.ALL);
         trimHistory(target);
     }
 
-    // Специальный метод для добавления логов боя с твоим форматом
-    public void addCombatLog(boolean isOutgoing, String playerName, String entityName, float amount, boolean isKill) {
-        String time = LocalTime.now().format(TIME_FORMATTER);
-        String prefix = isOutgoing ? "[Урон. Исходящий]" : "[Урон. Входящий]";
-        String action = isKill ? (isOutgoing ? "Вы убили" : "Вас убил") : (isOutgoing ? "Вы ранили" : "Вас ранил");
+    private Component reformatCombatMessage(Component msg) {
+        String text = msg.getString(); // Получаем сырой текст без цветов
+        // Убираем префикс [COMBAT] если он есть в тексте
+        text = text.replace("[COMBAT] ", "").trim();
 
-        String text;
-        if (isKill) {
-            text = String.format("[%s] %s [%s]: %s %s", time, prefix, playerName, action, entityName);
-        } else {
-            text = String.format("[%s] %s [%s]: %s %s (%.1f)", time, prefix, playerName, action, entityName, amount);
+        String time = LocalTime.now().format(TIME_FORMATTER);
+        String player = "Вы"; // Предполагаем "Вы", так как логи клиентоориентированные
+
+        Matcher mDealt = DAMAGE_DEALT_PATTERN.matcher(text);
+        if (mDealt.find()) {
+            String dmg = mDealt.group(1);
+            String entity = mDealt.group(2);
+            // [HH.MM.SS] [Урон. Исходящий] [Игрок]: Вы ранили [AnyEntity] (#.#)
+            String fmt = String.format("[%s] [Урон. Исходящий] [%s]: Вы ранили %s (%s)", time, player, entity, dmg);
+            return Component.literal(fmt).withStyle(ChatFormatting.GREEN);
         }
 
-        // Цвет: Красный для входящего, Зеленый/Желтый для исходящего (можно настроить стилями)
-        Component comp = Component.literal(text).withStyle(isOutgoing ? net.minecraft.ChatFormatting.GREEN : net.minecraft.ChatFormatting.RED);
+        Matcher mKill = KILL_PATTERN.matcher(text);
+        if (mKill.find()) {
+            String entity = mKill.group(1);
+            String fmt = String.format("[%s] [Урон. Исходящий] [%s]: Вы убили: %s", time, player, entity);
+            return Component.literal(fmt).withStyle(ChatFormatting.GOLD);
+        }
 
-        addMessage(ChatMessageType.COMBAT, comp);
+        // Возвращаем как есть, если не подошло, но с временем
+        return Component.literal("[" + time + "] " + text).withStyle(ChatFormatting.GRAY);
     }
 
     private void trimHistory(ChatChannel channel) {
@@ -82,13 +110,13 @@ public class ClientChatManager {
         return messages.getOrDefault(target, new ArrayList<>());
     }
 
+    // ... Маппинги (без изменений) ...
     private ChatChannel mapStringToChannel(String name) {
         switch (name) {
             case "Торг": return ChatChannel.TRADE;
-            case "Личное": return ChatChannel.WHISPER;
+            case "Личное": return ChatChannel.WHISPER; // Переименовал
             case "Урон": return ChatChannel.COMBAT;
-            case "Общий":
-            default: return ChatChannel.ALL;
+            case "Общий": default: return ChatChannel.ALL;
         }
     }
 
@@ -96,8 +124,6 @@ public class ClientChatManager {
         if (type == ChatMessageType.TRADE) return ChatChannel.TRADE;
         if (type == ChatMessageType.WHISPER) return ChatChannel.WHISPER;
         if (type == ChatMessageType.COMBAT) return ChatChannel.COMBAT;
-
-        // GENERAL и любые другие неизвестные типы шлем в ALL (Общий чат)
         return ChatChannel.ALL;
     }
 

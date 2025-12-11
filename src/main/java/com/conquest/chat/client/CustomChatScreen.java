@@ -5,11 +5,8 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.CommandSuggestions;
-import net.minecraft.client.gui.components.EditBox;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.Style;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
 import net.minecraftforge.api.distmarker.Dist;
@@ -40,35 +37,30 @@ public class CustomChatScreen extends ChatScreen {
 
     @Override
     protected void init() {
-        // Сначала super.init() чтобы создать this.input
         super.init();
-
         int chatWidth = ChatConfig.CLIENT.chatWidth.get();
         int chatHeight = ChatConfig.CLIENT.chatHeight.get();
         int x = 4;
         int y = this.height - chatHeight - 4;
 
-        // Настройка поля ввода
         this.input.setX(x + 4);
         this.input.setY(y + chatHeight - 14);
         this.input.setWidth(chatWidth - 8);
         this.input.setBordered(false);
         this.input.setMaxLength(256);
-        // Делаем текст белым всегда
         this.input.setTextColor(0xFFFFFFFF);
 
-        // Важно: пересоздаем suggestions с правильными параметрами
+        // Включаем подсказки
         this.commandSuggestions = new CommandSuggestions(this.minecraft, this, this.input, this.font, false, false, 0, 10, false, -805306368);
         this.commandSuggestions.setAllowSuggestions(true);
         this.commandSuggestions.updateCommandInfo();
 
-        // Авто-вставка @ для Личных
-        if (currentTab.equals("Личные") && (this.input.getValue().isEmpty() || this.input.getValue().equals("/"))) {
+        // Логика авто-вставки @
+        if (currentTab.equals("Личное") && (this.input.getValue().isEmpty() || this.input.getValue().equals("/"))) {
             this.input.setValue("@");
-            // Перемещаем курсор в конец, чтобы работали подсказки
             this.input.setCursorPosition(1);
             this.input.setHighlightPos(1);
-            this.commandSuggestions.updateCommandInfo(); // Обновить подсказки сразу
+            this.commandSuggestions.updateCommandInfo();
         }
     }
 
@@ -87,7 +79,7 @@ public class CustomChatScreen extends ChatScreen {
         this.animationAlpha = duration > 0 ? Mth.clamp(elapsed / duration, 0.0f, 1.0f) : 1.0f;
 
         int bgColor = 0xFF000000;
-        int bgAlpha = 180;
+        int bgAlpha = 200; // Чуть темнее фон (200/255)
         int finalBgColor = ((int)(bgAlpha * animationAlpha) << 24) | (bgColor & 0x00FFFFFF);
 
         int width = ChatConfig.CLIENT.chatWidth.get();
@@ -95,47 +87,40 @@ public class CustomChatScreen extends ChatScreen {
         int x = 4;
         int y = this.height - height - 4;
 
-        // Фон
         graphics.fill(x, y, x + width, y + height, finalBgColor);
-        // Хедер
-        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0x88000000);
+        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0xAA000000); // Хедер еще темнее
 
-        // Вкладки и контент
         renderTabs(graphics, mouseX, mouseY, x, y, width);
         renderMessages(graphics, mouseX, mouseY, x, y + TAB_HEIGHT + 4, width, height - TAB_HEIGHT - 18);
         renderSettingsButton(graphics, mouseX, mouseY, x + 4, y + 4);
 
-        // Линия ввода
         int inputLineY = y + height - 16;
         graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
 
-        // ВАЖНО: Рисуем input вручную или через super, но контролируем альфу
         RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
-
-        // Input рисуем сами, чтобы убрать стандартный черный фон если он пролезает
-        // super.render(graphics, mouseX, mouseY, partialTick); // Можно убрать если мешает
         this.input.render(graphics, mouseX, mouseY, partialTick);
-
-        // Подсказки рисуем ПОВЕРХ всего
         this.commandSuggestions.render(graphics, mouseX, mouseY);
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
     }
 
     private void renderTabs(GuiGraphics graphics, int mouseX, int mouseY, int x, int y, int width) {
-        String[] tabs = {"Общий", "Торг", "Личные", "Урон", "+"};
+        String[] tabs = {"Общий", "Торг", "Личное", "Урон", "+"};
         int tabX = x + 24;
-        int tabPadding = 6;
+        int tabPadding = 8; // Чуть больше отступ
 
         for (String tab : tabs) {
             int textWidth = this.font.width(tab);
             boolean isActive = tab.equals(currentTab);
 
-            if (isActive) {
-                graphics.fill(tabX - 2, y + TAB_HEIGHT - 2, tabX + textWidth + 2, y + TAB_HEIGHT, 0xFFFFFFFF);
-            }
+            // Цвет текста: Активный = Белый (FFFFFFFF), Неактивный = Серый (FFAAAAAA)
+            int color = isActive ? 0xFFFFFFFF : 0xFFAAAAAA;
 
-            int color = isActive ? 0xFF000000 : 0xFFAAAAAA; // Активный текст черный (на белом фоне)
             graphics.drawString(this.font, Component.literal(tab), tabX, y + 4, color, false);
+
+            // Подчеркивание для активной вкладки
+            if (isActive) {
+                graphics.fill(tabX, y + TAB_HEIGHT - 2, tabX + textWidth, y + TAB_HEIGHT - 1, 0xFFFFFFFF);
+            }
 
             tabX += textWidth + tabPadding * 2;
         }
@@ -147,7 +132,6 @@ public class CustomChatScreen extends ChatScreen {
 
         List<FormattedCharSequence> wrappedLines = new ArrayList<>();
         int maxTextWidth = width - 12;
-
         for (Component msg : rawMessages) {
             wrappedLines.addAll(this.font.split(msg, maxTextWidth));
         }
@@ -155,6 +139,11 @@ public class CustomChatScreen extends ChatScreen {
         int lineHeight = this.font.lineHeight + 1;
         int visibleLines = height / lineHeight;
         int totalLines = wrappedLines.size();
+
+        // ФИКС СКРОЛЛА: Не даем уйти в минус
+        if (scrollOffset < 0) scrollOffset = 0;
+        int maxScroll = Math.max(0, totalLines - visibleLines);
+        if (scrollOffset > maxScroll) scrollOffset = maxScroll;
 
         int startIndex = Math.max(0, totalLines - visibleLines - scrollOffset);
         int endIndex = Math.max(0, totalLines - scrollOffset);
@@ -172,7 +161,6 @@ public class CustomChatScreen extends ChatScreen {
             float scrollP = (float)scrollOffset / (totalLines - visibleLines);
             int scrollY = y + height - scrollH - (int)(scrollP * (height - scrollH));
 
-            // Скролл слева
             graphics.fill(x, scrollY, x + SCROLLBAR_WIDTH, scrollY + scrollH, 0xFFFFFFFF);
         }
     }
@@ -191,21 +179,18 @@ public class CustomChatScreen extends ChatScreen {
             int x = 4;
             int y = this.height - height - 4;
 
-            // Вкладки
             if (mouseY >= y && mouseY < y + TAB_HEIGHT && mouseX >= x && mouseX < x + width) {
-                String[] tabs = {"Общий", "Торг", "Личные", "Урон"};
+                String[] tabs = {"Общий", "Торг", "Личное", "Урон"};
                 int tabX = x + 24;
-                int tabPadding = 6;
+                int tabPadding = 8;
                 for (String tab : tabs) {
                     int textWidth = this.font.width(tab);
                     if (mouseX >= tabX && mouseX < tabX + textWidth + tabPadding * 2) {
                         if (!currentTab.equals(tab)) {
                             this.currentTab = tab;
                             this.scrollOffset = 0;
-
-                            // Логика переключения инпута
-                            this.input.setValue(""); // Очищаем при смене
-                            if (tab.equals("Личные")) {
+                            this.input.setValue("");
+                            if (tab.equals("Личное")) {
                                 this.input.setValue("@");
                             }
                         }
@@ -214,22 +199,8 @@ public class CustomChatScreen extends ChatScreen {
                     tabX += textWidth + tabPadding * 2;
                 }
             }
-
-            // Настройки
-            if (mouseX >= x && mouseX <= x + 20 && mouseY >= y && mouseY <= y + TAB_HEIGHT) {
-                // Open config screen here
-                return true;
-            }
-
-            // Клик по ссылкам (в области сообщений)
-            if (mouseX >= x && mouseX <= x + width && mouseY >= y + TAB_HEIGHT && mouseY <= y + height - 16) {
-                // Здесь нужна реализация getStyleAt, аналогичная предыдущей версии, но для wrappedLines
-                // Это сложно сделать точно без сохранения структуры строк.
-                // Пока оставим пустым, чтобы не крашить.
-            }
         }
 
-        // Даем инпуту фокус
         if (this.input.mouseClicked(mouseX, mouseY, button)) return true;
 
         return super.mouseClicked(mouseX, mouseY, button);
@@ -237,23 +208,18 @@ public class CustomChatScreen extends ChatScreen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        // 1. Сначала даем шанс подсказкам (TAB, Стрелки)
+        // TAB FIX: Если подсказки обработали нажатие, возвращаем true
         if (this.commandSuggestions.keyPressed(keyCode, scanCode, modifiers)) {
             return true;
         }
 
-        // 2. Обработка Enter
         if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             String text = this.input.getValue().trim();
             if (!text.isEmpty()) {
                 sendMessageByTab(text);
-                // Очищаем и закрываем, только если это не Личные (в личных удобно спамить)
-                this.input.setValue(currentTab.equals("Личные") ? "@" : "");
-
-                // ВАЖНО: Добавляем в историю (стрелочка вверх)
                 this.minecraft.gui.getChat().addRecentChat(text);
-
-                if (!currentTab.equals("Личные")) {
+                this.input.setValue(currentTab.equals("Личное") ? "@" : "");
+                if (!currentTab.equals("Личное")) {
                     this.minecraft.setScreen(null);
                 }
             } else {
@@ -262,29 +228,18 @@ public class CustomChatScreen extends ChatScreen {
             return true;
         }
 
-        // 3. Передаем нажатие в поле ввода
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     private void sendMessageByTab(String text) {
         if (currentTab.equals("Торг")) {
-            // Либо команда, либо префикс
             this.minecraft.getConnection().sendChat("[Торг] " + text);
-        } else if (currentTab.equals("Личные")) {
-            if (text.startsWith("@")) {
-                // Пытаемся распарсить "@Nick message"
-                // Если пробела нет, значит сообщение пустое
-                if (!text.contains(" ")) {
-                    return; // Не отправляем огрызок
-                }
+        } else if (currentTab.equals("Личное")) {
+            if (text.startsWith("@") && text.contains(" ")) {
                 String[] parts = text.split(" ", 2);
-                String target = parts[0].substring(1); // Убираем @
+                String target = parts[0].substring(1);
                 String msg = parts[1];
                 this.minecraft.getConnection().sendCommand("msg " + target + " " + msg);
-
-                // Фейк сообщение себе в чат
-                chatManager.addMessage(com.conquest.chat.enums.ChatMessageType.WHISPER,
-                        Component.literal("Вы -> " + target + ": " + msg).withStyle(net.minecraft.ChatFormatting.GRAY));
             } else {
                 this.minecraft.getConnection().sendChat(text);
             }
@@ -298,7 +253,11 @@ public class CustomChatScreen extends ChatScreen {
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
         if (delta != 0) {
+            // ФИКС СКРОЛЛА: Инверсия и границы
+            // delta > 0 (колесико вверх) -> видим более старые сообщения (offset увеличивается)
             this.scrollOffset += (delta > 0) ? 1 : -1;
+
+            // Границы проверяются в render(), но лучше и здесь
             if (this.scrollOffset < 0) this.scrollOffset = 0;
             return true;
         }
