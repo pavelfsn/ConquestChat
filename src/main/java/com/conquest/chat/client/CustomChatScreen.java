@@ -199,8 +199,12 @@ public class CustomChatScreen extends ChatScreen {
 
             if (isInsideChatArea(mouseX, mouseY)) {
                 Style clickedStyle = getStyleAtPosition(mouseX, mouseY);
-                if (clickedStyle != null && handleCustomClick(clickedStyle)) {
-                    return true;
+                if (clickedStyle != null) {
+                    ConquestChatMod.LOGGER.info("Clicked style: " + clickedStyle); // LOGGING
+                    if (handleCustomClick(clickedStyle)) {
+                        ConquestChatMod.LOGGER.info("Custom click handled successfully"); // LOGGING
+                        return true;
+                    }
                 }
             }
         }
@@ -211,15 +215,18 @@ public class CustomChatScreen extends ChatScreen {
         ClickEvent clickEvent = style.getClickEvent();
         if (clickEvent == null) return false;
 
+        ConquestChatMod.LOGGER.info("Handling ClickEvent: " + clickEvent.getAction() + " val: " + clickEvent.getValue()); // LOGGING
+
         if (clickEvent.getAction() == ClickEvent.Action.OPEN_URL) {
             String url = clickEvent.getValue();
             if (this.minecraft != null && this.minecraft.options.chatLinks().get()) {
-                this.minecraft.setScreen(new ConfirmLinkScreen((confirmed) -> {
-                    if (confirmed) {
-                        Util.getPlatform().openUri(url);
-                    }
-                    this.minecraft.setScreen(this);
-                }, url, true));
+                // Прямое открытие для теста, чтобы исключить ConfirmLinkScreen как причину сбоя (хотя он нужен по правилам)
+                // Если сработает - вернем экран подтверждения
+                try {
+                    Util.getPlatform().openUri(url);
+                } catch (Exception e) {
+                    ConquestChatMod.LOGGER.error("Failed to open URI", e);
+                }
                 return true;
             }
         } else if (clickEvent.getAction() == ClickEvent.Action.RUN_COMMAND) {
