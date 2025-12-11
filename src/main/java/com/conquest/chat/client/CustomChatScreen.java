@@ -4,8 +4,11 @@ import com.conquest.chat.ConquestChatMod;
 import com.conquest.chat.enums.ChatChannel;
 import com.conquest.chat.network.ChannelSyncPacket;
 import com.conquest.chat.network.NetworkHandler;
+import net.minecraft.Util;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.client.gui.screens.ConfirmLinkScreen;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
 import net.minecraft.util.Mth;
@@ -14,17 +17,8 @@ import net.minecraftforge.network.PacketDistributor;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Custom implementation of the Chat Screen ensuring STALCRAFT-like design.
- * Features:
- * - Tabbed channels (Global, Trade, etc.)
- * - Compact design at bottom-left
- * - Smooth fade-in animation
- * - Full support for Hover and Click events (links, items)
- */
 public class CustomChatScreen extends ChatScreen {
 
-    // --- DESIGN CONSTANTS ---
     private static final int CHAT_WIDTH = 320;
     private static final int CHAT_HEIGHT = 180;
     private static final int TAB_HEIGHT = 16;
@@ -32,13 +26,11 @@ public class CustomChatScreen extends ChatScreen {
     private static final int MARGIN_LEFT = 4;
     private static final int MARGIN_BOTTOM = 40;
 
-    // Animation constants
-    private static final float ANIMATION_DURATION = 100f; // ms (was 200f)
+    private static final float ANIMATION_DURATION = 100f;
 
     private int scrollOffset = 0;
     private long openTime;
 
-    // Tabs logic
     private static class Tab {
         final ChatChannel channel;
         final String title;
@@ -64,19 +56,17 @@ public class CustomChatScreen extends ChatScreen {
         super.init();
         this.openTime = System.currentTimeMillis();
 
-        // Position the input field (EditBox)
         int inputY = this.height - MARGIN_BOTTOM + 4;
         this.input.setX(MARGIN_LEFT + 2);
         this.input.setY(inputY);
         this.input.setWidth(CHAT_WIDTH - 4);
-        this.input.setBordered(false); // Custom background rendering
+        this.input.setBordered(false);
 
-        // Initialize Tabs
         tabs.clear();
         int chatTop = this.height - MARGIN_BOTTOM - CHAT_HEIGHT;
         int tabY = chatTop - TAB_HEIGHT;
 
-        int startX = MARGIN_LEFT + 16; // Offset for settings button
+        int startX = MARGIN_LEFT + 16;
         int tabWidth = 60;
 
         tabs.add(createTab(ChatChannel.ALL, "Общий", startX, tabY, tabWidth, TAB_HEIGHT));
@@ -89,7 +79,6 @@ public class CustomChatScreen extends ChatScreen {
             tabs.add(createTab(ChatChannel.valueOf("COMBAT"), "Урон", startX, tabY, tabWidth, TAB_HEIGHT));
         } catch (IllegalArgumentException ignored) {}
 
-        // Settings Button (Stub)
         int settingsBtnSize = 12;
         int settingsBtnX = MARGIN_LEFT + 2;
         int settingsBtnY = tabY + (TAB_HEIGHT - settingsBtnSize) / 2;
@@ -109,11 +98,9 @@ public class CustomChatScreen extends ChatScreen {
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-        // --- ANIMATION ---
         long elapsed = System.currentTimeMillis() - openTime;
         float alpha = Mth.clamp(elapsed / ANIMATION_DURATION, 0f, 1f);
 
-        // Alpha logic: 0xAA (170) is max opacity for bg, 0xFF (255) for text
         int bgAlpha = (int)(170 * alpha);
         int textAlpha = (int)(255 * alpha);
 
@@ -125,11 +112,9 @@ public class CustomChatScreen extends ChatScreen {
         int chatLeft = MARGIN_LEFT;
         int chatRight = chatLeft + CHAT_WIDTH;
 
-        // Render Background
         int bgColor = (bgAlpha << 24) | 0x000000;
         guiGraphics.fill(chatLeft, chatTop, chatRight, chatBottom, bgColor);
 
-        // Render Tabs
         for (Tab tab : tabs) {
             boolean isActive = (tab.channel == active);
             boolean isHovered = tab.isInside(mouseX, mouseY);
@@ -141,7 +126,6 @@ public class CustomChatScreen extends ChatScreen {
             int finalTabColor = (tabAlpha << 24) | color;
             guiGraphics.fill(tab.x, tab.y, tab.x + tab.w, tab.y + tab.h, finalTabColor);
 
-            // Active tab indicator (white line on top)
             if (isActive) {
                 guiGraphics.fill(tab.x, tab.y, tab.x + tab.w, tab.y + 1, (textAlpha << 24) | 0xFFFFFF);
             }
@@ -151,12 +135,10 @@ public class CustomChatScreen extends ChatScreen {
             guiGraphics.drawCenteredString(this.font, tab.title, tab.x + tab.w / 2, tab.y + 4, finalTextColor);
         }
 
-        // --- MESSAGES RENDERING ---
         int lineHeight = this.font.lineHeight + 1;
         int maxLines = CHAT_HEIGHT / lineHeight;
         int totalMessages = messages.size();
 
-        // Scroll calculation
         if (totalMessages <= maxLines) scrollOffset = 0;
         else scrollOffset = Mth.clamp(scrollOffset, 0, totalMessages - maxLines);
 
@@ -172,17 +154,14 @@ public class CustomChatScreen extends ChatScreen {
             int y = chatBottom - lineHeight * (i + 1);
             int x = chatLeft + 4;
 
-            // Draw text with alpha
             guiGraphics.drawString(this.font, line, x, y + 2, (textAlpha << 24) | 0xFFFFFF);
 
-            // Hover Check logic
             if (mouseY >= y + 2 && mouseY < y + 2 + this.font.lineHeight && mouseX >= x && mouseX < chatRight) {
                 int xOffset = mouseX - x;
                 hoveredStyle = this.font.getSplitter().componentStyleAtWidth(line, xOffset);
             }
         }
 
-        // --- SCROLLBAR ---
         if (totalMessages > maxLines) {
             int barHeight = Math.max(10, (int) ((float) maxLines / totalMessages * CHAT_HEIGHT));
             int trackHeight = CHAT_HEIGHT;
@@ -195,16 +174,13 @@ public class CustomChatScreen extends ChatScreen {
             guiGraphics.fill(barX, barY, barX + 2, barY + barHeight, (textAlpha << 24) | 0xFFFFFF);
         }
 
-        // --- INPUT BACKGROUND ---
         guiGraphics.fill(chatLeft, chatBottom, chatRight, chatBottom + INPUT_HEIGHT + 4, (0xCC << 24) | 0x000000);
 
-        // Render Widgets (Input, Buttons)
         this.input.render(guiGraphics, mouseX, mouseY, partialTick);
         for (net.minecraft.client.gui.components.Renderable widget : this.renderables) {
             widget.render(guiGraphics, mouseX, mouseY, partialTick);
         }
 
-        // --- HOVER TOOLTIP ---
         if (hoveredStyle != null && hoveredStyle.getHoverEvent() != null) {
             guiGraphics.renderComponentHoverEffect(this.font, hoveredStyle, mouseX, mouseY);
         }
@@ -213,7 +189,6 @@ public class CustomChatScreen extends ChatScreen {
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (button == 0) {
-            // 1. Check Tabs
             for (Tab tab : tabs) {
                 if (tab.isInside(mouseX, mouseY)) {
                     setActiveChannel(tab.channel);
@@ -222,10 +197,9 @@ public class CustomChatScreen extends ChatScreen {
                 }
             }
 
-            // 2. Check Clickable Text (Links, Commands)
             if (isInsideChatArea(mouseX, mouseY)) {
                 Style clickedStyle = getStyleAtPosition(mouseX, mouseY);
-                if (clickedStyle != null && this.handleComponentClicked(clickedStyle)) {
+                if (clickedStyle != null && handleCustomClick(clickedStyle)) {
                     return true;
                 }
             }
@@ -233,7 +207,43 @@ public class CustomChatScreen extends ChatScreen {
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
-    // Helper to check if mouse is inside the message area
+    private boolean handleCustomClick(Style style) {
+        ClickEvent clickEvent = style.getClickEvent();
+        if (clickEvent == null) return false;
+
+        if (clickEvent.getAction() == ClickEvent.Action.OPEN_URL) {
+            String url = clickEvent.getValue();
+            if (this.minecraft != null && this.minecraft.options.chatLinks().get()) {
+                this.minecraft.setScreen(new ConfirmLinkScreen((confirmed) -> {
+                    if (confirmed) {
+                        Util.getPlatform().openUri(url);
+                    }
+                    this.minecraft.setScreen(this);
+                }, url, true));
+                return true;
+            }
+        } else if (clickEvent.getAction() == ClickEvent.Action.RUN_COMMAND) {
+            String command = clickEvent.getValue();
+            if (this.minecraft != null && this.minecraft.player != null) {
+                if (command.startsWith("/")) {
+                    command = command.substring(1);
+                }
+                this.minecraft.player.connection.sendCommand(command);
+            }
+            return true;
+        } else if (clickEvent.getAction() == ClickEvent.Action.SUGGEST_COMMAND) {
+            this.input.setValue(clickEvent.getValue());
+            return true;
+        } else if (clickEvent.getAction() == ClickEvent.Action.COPY_TO_CLIPBOARD) {
+            if (this.minecraft != null) {
+                this.minecraft.keyboardHandler.setClipboard(clickEvent.getValue());
+            }
+            return true;
+        }
+
+        return false;
+    }
+
     private boolean isInsideChatArea(double mouseX, double mouseY) {
         int chatBottom = this.height - MARGIN_BOTTOM;
         int chatTop = chatBottom - CHAT_HEIGHT;
@@ -242,7 +252,6 @@ public class CustomChatScreen extends ChatScreen {
         return mouseX >= chatLeft && mouseX < chatRight && mouseY >= chatTop && mouseY < chatBottom;
     }
 
-    // Helper to get Style at mouse position (DRY principle)
     private Style getStyleAtPosition(double mouseX, double mouseY) {
         ChatChannel active = ClientChatManager.getInstance().getActiveTab();
         var messages = ClientChatManager.getInstance().getMessagesForTab(active);
