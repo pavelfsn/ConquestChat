@@ -1,0 +1,24 @@
+# Gradle and Build
+.gradle/
+build/
+out/
+
+# Minecraft Run folders (logs, saves, configs local to run)
+run/
+run*/
+logs/
+crash-reports/
+
+# IDEA settings (user-specific)
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+*.iws
+
+# Mac/OS temp files
+.DS_Store
+
+# Игнорируем файлы модулей IDEA (они сами пересоздаются)
+*.iml
+.idea/modules.xml
+.idea/jarRepositories.xml
