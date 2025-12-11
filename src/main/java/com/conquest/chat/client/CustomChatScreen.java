@@ -1,326 +1,305 @@
 package com.conquest.chat.client;
 
-import com.conquest.chat.ConquestChatMod;
-import com.conquest.chat.enums.ChatChannel;
-import com.conquest.chat.network.ChannelSyncPacket;
-import com.conquest.chat.network.NetworkHandler;
-import net.minecraft.Util;
+import com.conquest.chat.config.ChatConfig;
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.CommandSuggestions;
+import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.ChatScreen;
-import net.minecraft.client.gui.screens.ConfirmLinkScreen;
-import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
+import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
-import net.minecraftforge.network.PacketDistributor;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.List;
 
+@OnlyIn(Dist.CLIENT)
 public class CustomChatScreen extends ChatScreen {
 
-    private static final int CHAT_WIDTH = 320;
-    private static final int CHAT_HEIGHT = 180;
-    private static final int TAB_HEIGHT = 16;
-    private static final int INPUT_HEIGHT = 14;
-    private static final int MARGIN_LEFT = 4;
-    private static final int MARGIN_BOTTOM = 40;
+    private static final int TAB_HEIGHT = 16; // Высота шапки с вкладками
+    private static final int SCROLLBAR_WIDTH = 2;
 
-    private static final float ANIMATION_DURATION = 100f;
-
+    private final long openTime;
+    private float animationAlpha = 0.0f;
+    private String currentTab = "Общий";
     private int scrollOffset = 0;
-    private long openTime;
 
-    private static class Tab {
-        final ChatChannel channel;
-        final String title;
-        int x, y, w, h;
+    private final ClientChatManager chatManager = ClientChatManager.getInstance();
 
-        Tab(ChatChannel channel, String title) {
-            this.channel = channel;
-            this.title = title;
-        }
+    // Для автодополнения (TAB)
+    private CommandSuggestions commandSuggestions;
 
-        boolean isInside(double mx, double my) {
-            return mx >= x && mx < x + w && my >= y && my < y + h;
-        }
-    }
-    private final List<Tab> tabs = new ArrayList<>();
-
-    public CustomChatScreen(String defaultText) {
-        super(defaultText);
+    public CustomChatScreen(String initialMessage) {
+        super(initialMessage);
+        this.openTime = System.currentTimeMillis();
     }
 
     @Override
     protected void init() {
-        super.init();
-        this.openTime = System.currentTimeMillis();
+        super.init(); // Инициализирует this.input
 
-        int inputY = this.height - MARGIN_BOTTOM + 4;
-        this.input.setX(MARGIN_LEFT + 2);
-        this.input.setY(inputY);
-        this.input.setWidth(CHAT_WIDTH - 4);
+        int chatWidth = ChatConfig.CLIENT.chatWidth.get();
+        int chatHeight = ChatConfig.CLIENT.chatHeight.get();
+        int x = 4; // Прижат к левому краю
+        int y = this.height - chatHeight - 4;
+
+        // Настройка поля ввода
+        // Делаем его невидимым (без фона), но функциональным
+        this.input.setX(x + 4);
+        this.input.setY(y + chatHeight - 14);
+        this.input.setWidth(chatWidth - 8);
         this.input.setBordered(false);
+        this.input.setMaxLength(256);
 
-        tabs.clear();
-        int chatTop = this.height - MARGIN_BOTTOM - CHAT_HEIGHT;
-        int tabY = chatTop - TAB_HEIGHT;
+        // Инициализация подсказок команд
+        this.commandSuggestions = new CommandSuggestions(this.minecraft, this, this.input, this.font, false, false, 0, 10, false, -805306368);
+        this.commandSuggestions.setAllowSuggestions(true);
+        this.commandSuggestions.updateCommandInfo();
 
-        int startX = MARGIN_LEFT + 16;
-        int tabWidth = 60;
-
-        tabs.add(createTab(ChatChannel.ALL, "Общий", startX, tabY, tabWidth, TAB_HEIGHT));
-        startX += tabWidth + 2;
-        tabs.add(createTab(ChatChannel.TRADE, "Торг", startX, tabY, tabWidth, TAB_HEIGHT));
-        startX += tabWidth + 2;
-        tabs.add(createTab(ChatChannel.WHISPER, "Личное", startX, tabY, tabWidth, TAB_HEIGHT));
-        startX += tabWidth + 2;
-        try {
-            tabs.add(createTab(ChatChannel.valueOf("COMBAT"), "Урон", startX, tabY, tabWidth, TAB_HEIGHT));
-        } catch (IllegalArgumentException ignored) {}
-
-        int settingsBtnSize = 12;
-        int settingsBtnX = MARGIN_LEFT + 2;
-        int settingsBtnY = tabY + (TAB_HEIGHT - settingsBtnSize) / 2;
-
-        this.addRenderableWidget(net.minecraft.client.gui.components.Button.builder(Component.literal("⚙"), (btn) -> {
-            if (this.minecraft != null && this.minecraft.player != null) {
-                this.minecraft.player.sendSystemMessage(Component.literal("Настройки чата пока не реализованы"));
-            }
-        }).pos(settingsBtnX, settingsBtnY).size(settingsBtnSize, settingsBtnSize).build());
-    }
-
-    private Tab createTab(ChatChannel channel, String title, int x, int y, int w, int h) {
-        Tab tab = new Tab(channel, title);
-        tab.x = x; tab.y = y; tab.w = w; tab.h = h;
-        return tab;
+        // Логика авто-вставки символов при открытии
+        if (currentTab.equals("Личные") && this.input.getValue().isEmpty()) {
+            this.input.setValue("@");
+        }
     }
 
     @Override
-    public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+    public void resize(Minecraft minecraft, int width, int height) {
+        String s = this.input.getValue();
+        this.init(minecraft, width, height);
+        this.input.setValue(s);
+        this.commandSuggestions.updateCommandInfo();
+    }
+
+    @Override
+    public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // Анимация
         long elapsed = System.currentTimeMillis() - openTime;
-        float alpha = Mth.clamp(elapsed / ANIMATION_DURATION, 0f, 1f);
+        float duration = ChatConfig.CLIENT.fadeDuration.get();
+        this.animationAlpha = duration > 0 ? Mth.clamp(elapsed / duration, 0.0f, 1.0f) : 1.0f;
 
-        int bgAlpha = (int)(170 * alpha);
-        int textAlpha = (int)(255 * alpha);
+        int bgColor = 0xFF000000; // Черный фон
+        int bgAlpha = 180; // Полупрозрачность (0-255)
+        int finalBgColor = ((int)(bgAlpha * animationAlpha) << 24) | (bgColor & 0x00FFFFFF);
 
-        ChatChannel active = ClientChatManager.getInstance().getActiveTab();
-        var messages = ClientChatManager.getInstance().getMessagesForTab(active);
+        int width = ChatConfig.CLIENT.chatWidth.get();
+        int height = ChatConfig.CLIENT.chatHeight.get();
+        int x = 4;
+        int y = this.height - height - 4;
 
-        int chatBottom = this.height - MARGIN_BOTTOM;
-        int chatTop = chatBottom - CHAT_HEIGHT;
-        int chatLeft = MARGIN_LEFT;
-        int chatRight = chatLeft + CHAT_WIDTH;
+        // Фон всего окна
+        graphics.fill(x, y, x + width, y + height, finalBgColor);
 
-        int bgColor = (bgAlpha << 24) | 0x000000;
-        guiGraphics.fill(chatLeft, chatTop, chatRight, chatBottom, bgColor);
+        // Верхняя панель (Header) темнее
+        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0x88000000);
 
-        for (Tab tab : tabs) {
-            boolean isActive = (tab.channel == active);
-            boolean isHovered = tab.isInside(mouseX, mouseY);
+        // Элементы
+        renderTabs(graphics, mouseX, mouseY, x, y, width);
+        renderMessages(graphics, mouseX, mouseY, x, y + TAB_HEIGHT + 4, width, height - TAB_HEIGHT - 18);
+        renderSettingsButton(graphics, mouseX, mouseY, x + 4, y + 4);
 
-            int tabAlpha = isActive ? (int)(255 * alpha) : (int)(170 * alpha);
-            int color = isActive ? 0x202020 : 0x000000;
-            if (isHovered && !isActive) color = 0x303030;
+        // Input field render (custom)
+        // Рисуем линию разделителя перед инпутом
+        int inputLineY = y + height - 16;
+        graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
 
-            int finalTabColor = (tabAlpha << 24) | color;
-            guiGraphics.fill(tab.x, tab.y, tab.x + tab.w, tab.y + tab.h, finalTabColor);
+        // Отрисовка текста ввода вручную, если нужно кастомизировать цвет
+        // Но super.render уже рисует input, если он visible.
+        // Мы сделали setBordered(false), так что он рисует только текст.
 
+        RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
+        super.render(graphics, mouseX, mouseY, partialTick);
+        this.commandSuggestions.render(graphics, mouseX, mouseY);
+        RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+    }
+
+    private void renderTabs(GuiGraphics graphics, int mouseX, int mouseY, int x, int y, int width) {
+        String[] tabs = {"Общий", "Торг", "Личные", "Урон", "+"}; // + как заглушка
+        int tabX = x + 24; // Отступ под шестеренку
+        int tabPadding = 6;
+
+        int activeColor = 0xFFFFFFFF; // Белый
+        int inactiveColor = 0xFFAAAAAA; // Серый
+
+        for (String tab : tabs) {
+            int textWidth = this.font.width(tab);
+            boolean isActive = tab.equals(currentTab);
+
+            // Если вкладка активна, рисуем под ней линию или фон
             if (isActive) {
-                guiGraphics.fill(tab.x, tab.y, tab.x + tab.w, tab.y + 1, (textAlpha << 24) | 0xFFFFFF);
+                graphics.fill(tabX - 2, y + TAB_HEIGHT - 2, tabX + textWidth + 2, y + TAB_HEIGHT, 0xFFFFFFFF);
             }
 
-            int textColor = isActive ? 0xFFFFFF : 0xAAAAAA;
-            int finalTextColor = (textAlpha << 24) | (textColor & 0x00FFFFFF);
-            guiGraphics.drawCenteredString(this.font, tab.title, tab.x + tab.w / 2, tab.y + 4, finalTextColor);
+            int color = isActive ? activeColor : inactiveColor;
+            graphics.drawString(this.font, Component.literal(tab), tabX, y + 4, color, false);
+
+            tabX += textWidth + tabPadding * 2;
+        }
+    }
+
+    private void renderMessages(GuiGraphics graphics, int mouseX, int mouseY, int x, int y, int width, int height) {
+        List<Component> rawMessages = chatManager.getMessages(currentTab);
+        if (rawMessages == null || rawMessages.isEmpty()) return;
+
+        // 1. Разбивка длинных строк (Wrapping)
+        List<FormattedCharSequence> wrappedLines = new ArrayList<>();
+        int maxTextWidth = width - 12; // Отступ для скролла
+
+        for (Component msg : rawMessages) {
+            List<FormattedCharSequence> lines = this.font.split(msg, maxTextWidth);
+            wrappedLines.addAll(lines);
         }
 
         int lineHeight = this.font.lineHeight + 1;
-        int maxLines = CHAT_HEIGHT / lineHeight;
-        int totalMessages = messages.size();
+        int visibleLines = height / lineHeight;
+        int totalLines = wrappedLines.size();
 
-        if (totalMessages <= maxLines) scrollOffset = 0;
-        else scrollOffset = Mth.clamp(scrollOffset, 0, totalMessages - maxLines);
+        int startIndex = Math.max(0, totalLines - visibleLines - scrollOffset);
+        int endIndex = Math.max(0, totalLines - scrollOffset);
 
-        int startIndex = totalMessages - 1 - scrollOffset;
+        int currentY = y + height - lineHeight; // Рисуем снизу вверх
 
-        Style hoveredStyle = null;
-
-        for (int i = 0; i < maxLines; i++) {
-            int msgIndex = startIndex - i;
-            if (msgIndex < 0) break;
-
-            Component line = messages.get(msgIndex);
-            int y = chatBottom - lineHeight * (i + 1);
-            int x = chatLeft + 4;
-
-            guiGraphics.drawString(this.font, line, x, y + 2, (textAlpha << 24) | 0xFFFFFF);
-
-            if (mouseY >= y + 2 && mouseY < y + 2 + this.font.lineHeight && mouseX >= x && mouseX < chatRight) {
-                int xOffset = mouseX - x;
-                hoveredStyle = this.font.getSplitter().componentStyleAtWidth(line, xOffset);
-            }
+        for (int i = endIndex - 1; i >= startIndex; i--) {
+            if (i < 0 || i >= wrappedLines.size()) break;
+            FormattedCharSequence line = wrappedLines.get(i);
+            graphics.drawString(this.font, line, x + 4, currentY, 0xFFFFFFFF, false);
+            currentY -= lineHeight;
         }
 
-        if (totalMessages > maxLines) {
-            int barHeight = Math.max(10, (int) ((float) maxLines / totalMessages * CHAT_HEIGHT));
-            int trackHeight = CHAT_HEIGHT;
-            int maxScroll = totalMessages - maxLines;
-            float scrollPercent = (float) scrollOffset / maxScroll;
-            int barY = chatBottom - barHeight - (int)(scrollPercent * (trackHeight - barHeight));
-            int barX = chatRight - 4;
+        // Скроллбар
+        if (totalLines > visibleLines) {
+            int scrollH = Math.max(10, (int)((float)visibleLines / totalLines * height));
+            float scrollP = (float)scrollOffset / (totalLines - visibleLines);
+            int scrollY = y + height - scrollH - (int)(scrollP * (height - scrollH));
 
-            guiGraphics.fill(barX, chatTop, barX + 2, chatBottom, (0x44 << 24) | 0xFFFFFF);
-            guiGraphics.fill(barX, barY, barX + 2, barY + barHeight, (textAlpha << 24) | 0xFFFFFF);
+            // Левый скроллбар (как на скрине) или правый. Сделаем слева как на скрине STALCRAFT?
+            // На скрине он слева.
+            int scrollX = x + 1;
+            graphics.fill(scrollX, scrollY, scrollX + SCROLLBAR_WIDTH, scrollY + scrollH, 0xFFFFFFFF);
         }
+    }
 
-        guiGraphics.fill(chatLeft, chatBottom, chatRight, chatBottom + INPUT_HEIGHT + 4, (0xCC << 24) | 0x000000);
-
-        this.input.render(guiGraphics, mouseX, mouseY, partialTick);
-        for (net.minecraft.client.gui.components.Renderable widget : this.renderables) {
-            widget.render(guiGraphics, mouseX, mouseY, partialTick);
-        }
-
-        if (hoveredStyle != null && hoveredStyle.getHoverEvent() != null) {
-            guiGraphics.renderComponentHoverEffect(this.font, hoveredStyle, mouseX, mouseY);
-        }
+    private void renderSettingsButton(GuiGraphics graphics, int mouseX, int mouseY, int x, int y) {
+        graphics.drawString(this.font, Component.literal("⚙"), x, y + 4, 0xFFAAAAAA, false);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (this.commandSuggestions.mouseClicked(mouseX, mouseY, button)) {
+            return true;
+        }
+
         if (button == 0) {
-            for (Tab tab : tabs) {
-                if (tab.isInside(mouseX, mouseY)) {
-                    setActiveChannel(tab.channel);
-                    playClickSound();
-                    return true;
+            int width = ChatConfig.CLIENT.chatWidth.get();
+            int x = 4;
+            int y = this.height - ChatConfig.CLIENT.chatHeight.get() - 4;
+
+            // Вкладки
+            if (mouseY >= y && mouseY < y + TAB_HEIGHT && mouseX >= x && mouseX < x + width) {
+                String[] tabs = {"Общий", "Торг", "Личные", "Урон"};
+                int tabX = x + 24;
+                int tabPadding = 6;
+                for (String tab : tabs) {
+                    int textWidth = this.font.width(tab);
+                    if (mouseX >= tabX && mouseX < tabX + textWidth + tabPadding * 2) {
+                        if (!currentTab.equals(tab)) {
+                            this.currentTab = tab;
+                            this.scrollOffset = 0;
+                            // Логика авто-вставки для Личных
+                            if (tab.equals("Личные")) {
+                                this.input.setValue("@");
+                            } else {
+                                if (this.input.getValue().equals("@")) this.input.setValue("");
+                            }
+                        }
+                        return true;
+                    }
+                    tabX += textWidth + tabPadding * 2;
                 }
             }
 
-            if (isInsideChatArea(mouseX, mouseY)) {
-                Style clickedStyle = getStyleAtPosition(mouseX, mouseY);
-                if (clickedStyle != null) {
-                    ConquestChatMod.LOGGER.info("Clicked style: " + clickedStyle); // LOGGING
-                    if (handleCustomClick(clickedStyle)) {
-                        ConquestChatMod.LOGGER.info("Custom click handled successfully"); // LOGGING
-                        return true;
-                    }
-                }
+            // Настройки
+            if (mouseX >= x && mouseX <= x + 20 && mouseY >= y && mouseY <= y + TAB_HEIGHT) {
+                Minecraft.getInstance().setScreen(null); // Закрыть чат (или открыть настройки)
+                return true;
             }
         }
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
-    private boolean handleCustomClick(Style style) {
-        ClickEvent clickEvent = style.getClickEvent();
-        if (clickEvent == null) return false;
-
-        ConquestChatMod.LOGGER.info("Handling ClickEvent: " + clickEvent.getAction() + " val: " + clickEvent.getValue());
-
-        if (clickEvent.getAction() == ClickEvent.Action.OPEN_URL) {
-            String url = clickEvent.getValue();
-            // Безопасная проверка настроек (с try-catch на случай NPE или изменений API)
-            boolean chatLinksEnabled = true;
-            try {
-                if (this.minecraft != null) {
-                    chatLinksEnabled = this.minecraft.options.chatLinks().get();
-                }
-            } catch (Exception e) {
-                // Игнорируем ошибку получения настройки, считаем что включено по умолчанию
-            }
-
-            if (chatLinksEnabled) {
-                try {
-                    // Используем ConfirmLinkScreen как положено
-                    this.minecraft.setScreen(new ConfirmLinkScreen((confirmed) -> {
-                        if (confirmed) {
-                            try {
-                                Util.getPlatform().openUri(url);
-                            } catch (Exception e) {
-                                ConquestChatMod.LOGGER.error("Failed to open URI in ConfirmScreen", e);
-                            }
-                        }
-                        this.minecraft.setScreen(this);
-                    }, url, true));
-                } catch (Exception e) {
-                    ConquestChatMod.LOGGER.error("Failed to set ConfirmLinkScreen", e);
-                }
-                return true;
-            }
-        } else if (clickEvent.getAction() == ClickEvent.Action.RUN_COMMAND) {
-            String command = clickEvent.getValue();
-            if (this.minecraft != null && this.minecraft.player != null) {
-                if (command.startsWith("/")) {
-                    command = command.substring(1);
-                }
-                this.minecraft.player.connection.sendCommand(command);
-            }
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (this.commandSuggestions.keyPressed(keyCode, scanCode, modifiers)) {
             return true;
-        } else if (clickEvent.getAction() == ClickEvent.Action.SUGGEST_COMMAND) {
-            this.input.setValue(clickEvent.getValue());
-            return true;
-        } else if (clickEvent.getAction() == ClickEvent.Action.COPY_TO_CLIPBOARD) {
-            if (this.minecraft != null) {
-                this.minecraft.keyboardHandler.setClipboard(clickEvent.getValue());
+        }
+
+        // Enter - отправка
+        if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+            String text = this.input.getValue().trim();
+            if (!text.isEmpty()) {
+                sendMessageByTab(text);
+                this.input.setValue("");
+                // Не закрываем чат, если это "Личные", чтобы удобно было продолжать
+                if (!currentTab.equals("Личные")) {
+                    this.minecraft.setScreen(null);
+                }
             }
             return true;
         }
 
-        return false;
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
-    private boolean isInsideChatArea(double mouseX, double mouseY) {
-        int chatBottom = this.height - MARGIN_BOTTOM;
-        int chatTop = chatBottom - CHAT_HEIGHT;
-        int chatLeft = MARGIN_LEFT;
-        int chatRight = chatLeft + CHAT_WIDTH;
-        return mouseX >= chatLeft && mouseX < chatRight && mouseY >= chatTop && mouseY < chatBottom;
-    }
-
-    private Style getStyleAtPosition(double mouseX, double mouseY) {
-        ChatChannel active = ClientChatManager.getInstance().getActiveTab();
-        var messages = ClientChatManager.getInstance().getMessagesForTab(active);
-
-        int lineHeight = this.font.lineHeight + 1;
-        int maxLines = CHAT_HEIGHT / lineHeight;
-        int startIndex = messages.size() - 1 - scrollOffset;
-        int chatBottom = this.height - MARGIN_BOTTOM;
-        int chatLeft = MARGIN_LEFT;
-
-        for (int i = 0; i < maxLines; i++) {
-            int msgIndex = startIndex - i;
-            if (msgIndex < 0) break;
-
-            int y = chatBottom - lineHeight * (i + 1);
-            if (mouseY >= y + 2 && mouseY < y + 2 + this.font.lineHeight) {
-                Component line = messages.get(msgIndex);
-                int xOffset = (int)mouseX - (chatLeft + 4);
-                return this.font.getSplitter().componentStyleAtWidth(line, xOffset);
+    private void sendMessageByTab(String text) {
+        // Логика маршрутизации
+        if (currentTab.equals("Торг")) {
+            // Если на сервере есть команда для торга (напр /trade)
+            // this.minecraft.getConnection().sendCommand("trade " + text);
+            // Если просто в чат с префиксом:
+            this.minecraft.getConnection().sendChat("[Торг] " + text);
+        } else if (currentTab.equals("Личные")) {
+            // Ожидаем формат "@Nick message"
+            if (text.startsWith("@")) {
+                String[] parts = text.split(" ", 2);
+                if (parts.length > 1) {
+                    String target = parts[0].substring(1);
+                    String msg = parts[1];
+                    this.minecraft.getConnection().sendCommand("msg " + target + " " + msg);
+                }
+            } else {
+                // Если забыл @
+                this.minecraft.getConnection().sendChat(text);
             }
+        } else if (currentTab.equals("Урон")) {
+            // В чат урона обычно писать нельзя
+            Minecraft.getInstance().getToasts().addToast(new SystemToast(
+                    SystemToast.SystemToastIds.PERIODIC_NOTIFICATION,
+                    Component.literal("Ошибка"),
+                    Component.literal("Нельзя писать в канал урона")
+            ));
+        } else {
+            // Общий
+            this.minecraft.getConnection().sendChat(text);
         }
-        return null;
-    }
 
-    private void playClickSound() {
-        if (this.minecraft != null) {
-            this.minecraft.getSoundManager().play(net.minecraft.client.resources.sounds.SimpleSoundInstance.forUI(net.minecraft.sounds.SoundEvents.UI_BUTTON_CLICK, 1.0F));
-        }
-    }
-
-    private void setActiveChannel(ChatChannel channel) {
-        ClientChatManager.getInstance().setActiveTab(channel);
-        scrollOffset = 0;
-        try {
-            NetworkHandler.CHANNEL.send(PacketDistributor.SERVER.noArg(), new ChannelSyncPacket(channel));
-        } catch (Exception e) {
-            ConquestChatMod.LOGGER.error("Failed to send channel sync packet", e);
-        }
+        // Сразу отображаем у себя (фейк), пока сервер не ответит (для отзывчивости)
+        chatManager.addMessage(com.conquest.chat.enums.ChatMessageType.GENERAL,
+                Component.literal(minecraft.player.getName().getString() + ": " + text));
     }
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        if (delta > 0) scrollOffset++;
-        else scrollOffset--;
-        return true;
+        if (delta != 0) {
+            this.scrollOffset += (delta > 0) ? 1 : -1;
+            // Здесь нужно знать точное количество wrapped lines для правильного клэмпа
+            // Упрощенно:
+            if (this.scrollOffset < 0) this.scrollOffset = 0;
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, delta);
     }
 }

@@ -1,5 +1,6 @@
 package com.conquest.chat;
 
+import com.conquest.chat.config.ChatConfig;
 import com.conquest.chat.config.ServerConfig;
 import com.conquest.chat.network.NetworkHandler;
 import net.minecraftforge.common.MinecraftForge;
@@ -28,6 +29,8 @@ public class ConquestChatMod {
 
         // Регистрируем сам мод в шине событий Forge
         MinecraftForge.EVENT_BUS.register(this);
+
+        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, ChatConfig.CLIENT_SPEC);
     }
 
     private void setup(final FMLCommonSetupEvent event) {
@@ -39,4 +42,5 @@ public class ConquestChatMod {
 
         LOGGER.info("ConquestChat Common setup complete");
     }
+
 }
