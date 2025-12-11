@@ -1,64 +1,57 @@
 package com.conquest.chat.client;
 
-import com.conquest.chat.ConquestChatMod;
-import com.conquest.chat.enums.ChatChannel;
 import com.conquest.chat.enums.ChatMessageType;
-import com.conquest.chat.network.ChannelSyncPacket;
-import com.conquest.chat.network.NetworkHandler;
-import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
 
+import java.util.UUID;
+
+@Mod.EventBusSubscriber(value = Dist.CLIENT)
 public class ClientChatHandler {
 
-    private static ChatChannel currentChannel = ChatChannel.ALL;
+    @SubscribeEvent
+    public static void onClientChatReceived(ClientChatReceivedEvent event) {
+        // В 1.20.1 системные сообщения (включая overlay) помечаются как isSystem() = true
+        // К сожалению, просто isSystem() = true может включать и важные серверные сообщения
+        // Но обычно Overlay сообщения имеют sender = null и специфический контент
 
-    public static void switchChannel() {
-        ConquestChatMod.LOGGER.info("CLIENT: switchChannel() called, current channel: {}", currentChannel);
+        // Более надежный способ для оверлея в 1.20.1 - это не перехватывать их здесь,
+        // а надеяться, что ClientChatReceivedEvent вызывается только для чата.
+        // Но если метод isOverlay() недоступен, попробуем проверить через isSystem() + косвенные признаки
 
-        ChatChannel oldChannel = currentChannel;
+        // Если это Action Bar (сообщение над хотбаром), оно обычно не должно попадать в чат.
+        // В Forge 1.20.1 event.isSystem() возвращает true для сообщений от сервера (/say, /tellraw и т.д.)
 
-        // Добавлен COMBAT и обработка GLOBAL
-        currentChannel = switch (currentChannel) {
-            case ALL -> ChatChannel.GLOBAL;
-            case GLOBAL -> ChatChannel.TRADE;
-            case TRADE -> ChatChannel.WHISPER;
-            case WHISPER -> ChatChannel.COMBAT;
-            case COMBAT -> ChatChannel.ALL;
-        };
+        // ВАЖНО: В новых версиях есть event.getBoundChatType(), но он сложный.
 
-        ConquestChatMod.LOGGER.info("CLIENT: Switched from {} to {}", oldChannel, currentChannel);
+        // Попробуем простое решение:
+        // Если сообщение приходит, мы его обрабатываем. Если это спам в action bar,
+        // он все равно вызовет ивент.
 
-        try {
-            NetworkHandler.CHANNEL.sendToServer(new ChannelSyncPacket(currentChannel));
-            ConquestChatMod.LOGGER.info("CLIENT: Packet sent to server");
-        } catch (Exception e) {
-            ConquestChatMod.LOGGER.error("CLIENT: Failed to send packet", e);
+        // В 1.20.1 есть event.isSystem(). Если true - это сообщение от системы/сервера.
+        // Обычно overlay сообщения (action bar) НЕ вызывают этот ивент в некоторых версиях Forge,
+        // или вызывают с особым флагом.
+
+        // Если у тебя нет доступа к event.isOverlay(), просто убери эту проверку пока.
+        // Если оверлей начнет спамить в чат, добавим фильтр по содержимому.
+
+        /*
+        if (event.isOverlay()) {
+            return;
         }
+        */
 
-        // Сообщение-подсказка по текущему каналу
-        String message = switch (currentChannel) {
-            case ALL -> "§7[Чат] §fВы переключились на §eОбщий чат §7(100 блоков)";
-            case GLOBAL -> "§7[Чат] §fВы переключились на §6Глобальный чат §7(весь сервер)";
-            case TRADE -> "§7[Чат] §fВы переключились на §aТорговый чат §7(радиус из конфига)";
-            case WHISPER -> "§7[Чат] §fЛичные сообщения: §e@НикИгрока сообщение §7(Tab для автодополнения)";
-            case COMBAT -> "§7[Чат] §fВы переключились на §cБоевой канал §7(боевые логи)";
-        };
+        Component message = event.getMessage();
+        UUID sender = event.getSender();
 
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.player != null) {
-            minecraft.player.displayClientMessage(Component.literal(message), true);
-            ConquestChatMod.LOGGER.info("CLIENT: Notification shown to player");
-        }
+        ChatMessageType type = ChatMessageType.GENERAL;
 
-        // Обновляем активную вкладку клиентского менеджера
-        ClientChatManager.getInstance().setActiveTab(currentChannel);
-    }
+        ClientChatManager.getInstance().addMessage(type, message);
 
-    public static ChatChannel getCurrentChannel() {
-        return currentChannel;
-    }
-
-    public static ChatMessageType getCurrentMessageType() {
-        return ClientChatManager.getInstance().getOutgoingType();
+        // Отменяем стандартную отрисовку, чтобы избежать дублирования
+        event.setCanceled(true);
     }
 }

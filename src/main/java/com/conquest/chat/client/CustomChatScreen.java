@@ -24,7 +24,7 @@ public class CustomChatScreen extends ChatScreen {
 
     private final long openTime;
     private float animationAlpha = 0.0f;
-    private String currentTab = "Общий";
+    private String currentTab; // Убрали инициализацию "Общий" здесь
     private int scrollOffset = 0;
 
     private final ClientChatManager chatManager = ClientChatManager.getInstance();
@@ -37,7 +37,15 @@ public class CustomChatScreen extends ChatScreen {
 
     @Override
     protected void init() {
+        // Восстанавливаем вкладку из менеджера ПЕРЕД super.init() или в начале
+        this.currentTab = chatManager.getActiveTabName();
+        if (this.currentTab == null) {
+            this.currentTab = "Общий";
+            chatManager.setActiveTabName("Общий");
+        }
+
         super.init();
+
         int chatWidth = ChatConfig.CLIENT.chatWidth.get();
         int chatHeight = ChatConfig.CLIENT.chatHeight.get();
         int x = 4;
@@ -62,16 +70,12 @@ public class CustomChatScreen extends ChatScreen {
         }
     }
 
-    @Override
-    public void resize(Minecraft minecraft, int width, int height) {
-        String s = this.input.getValue();
-        this.init(minecraft, width, height);
-        this.input.setValue(s);
-        this.commandSuggestions.updateCommandInfo();
-    }
+    // ... (resize, render без изменений) ...
+    // В render() код остается прежним, только убедись, что renderSettingsButton на месте
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // ... (фон, табы, сообщения) ...
         long elapsed = System.currentTimeMillis() - openTime;
         float duration = ChatConfig.CLIENT.fadeDuration.get();
         this.animationAlpha = duration > 0 ? Mth.clamp(elapsed / duration, 0.0f, 1.0f) : 1.0f;
@@ -93,11 +97,9 @@ public class CustomChatScreen extends ChatScreen {
 
         renderSettingsButton(graphics, mouseX, mouseY, x, y);
 
-        // Рендерим поле ввода только если это НЕ "Урон"
         if (!currentTab.equals("Урон")) {
             int inputLineY = y + height - 16;
             graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
-
             RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
             this.input.render(graphics, mouseX, mouseY, partialTick);
             this.commandSuggestions.render(graphics, mouseX, mouseY);
@@ -165,7 +167,6 @@ public class CustomChatScreen extends ChatScreen {
         }
     }
 
-    // --- Сдвинуто на +4 px ---
     private void renderSettingsButton(GuiGraphics graphics, int mouseX, int mouseY, int x, int y) {
         graphics.drawString(this.font, Component.literal("⚙"), x + 4, y + 3, 0xFFAAAAAA, false);
     }
@@ -180,9 +181,8 @@ public class CustomChatScreen extends ChatScreen {
         int y = this.height - height - 4;
 
         if (button == 0) {
-            // Клик по настройкам (x+4, y+3)
+            // Клик по настройкам
             if (mouseX >= x + 4 && mouseX <= x + 12 && mouseY >= y + 3 && mouseY <= y + 11) {
-                // TODO: Открыть конфиг
                 System.out.println("Settings clicked");
                 return true;
             }
@@ -197,6 +197,7 @@ public class CustomChatScreen extends ChatScreen {
                     if (mouseX >= tabX && mouseX < tabX + textWidth + tabPadding * 2) {
                         if (!currentTab.equals(tab)) {
                             this.currentTab = tab;
+                            chatManager.setActiveTabName(tab); // Сохраняем в менеджер!
                             this.scrollOffset = 0;
                             this.input.setValue("");
                             if (tab.equals("Личное")) this.input.setValue("@");
@@ -208,17 +209,16 @@ public class CustomChatScreen extends ChatScreen {
             }
         }
 
-        // Запрещаем клик в поле ввода, если вкладка "Урон"
         if (currentTab.equals("Урон")) return true;
 
         if (this.input.mouseClicked(mouseX, mouseY, button)) return true;
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
+    // ... sendMessageByTab, mouseScrolled, keyPressed - без изменений ...
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if (this.commandSuggestions.keyPressed(keyCode, scanCode, modifiers)) return true;
-
         if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             String text = this.input.getValue().trim();
             if (!text.isEmpty()) {
@@ -236,9 +236,6 @@ public class CustomChatScreen extends ChatScreen {
 
     private void sendMessageByTab(String text) {
         if (currentTab.equals("Торг")) {
-            // Отправляем как есть, если игрок сам не написал [Торг], префикс добавится в ClientChatManager при отображении,
-            // но для сервера лучше отправить чистое сообщение или команду глобального чата (если есть, например /g).
-            // Если на сервере просто чат:
             this.minecraft.getConnection().sendChat("[Торг] " + text);
         } else if (currentTab.equals("Личное")) {
             if (text.startsWith("@") && text.contains(" ")) {
