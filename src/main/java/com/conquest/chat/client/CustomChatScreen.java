@@ -215,17 +215,35 @@ public class CustomChatScreen extends ChatScreen {
         ClickEvent clickEvent = style.getClickEvent();
         if (clickEvent == null) return false;
 
-        ConquestChatMod.LOGGER.info("Handling ClickEvent: " + clickEvent.getAction() + " val: " + clickEvent.getValue()); // LOGGING
+        ConquestChatMod.LOGGER.info("Handling ClickEvent: " + clickEvent.getAction() + " val: " + clickEvent.getValue());
 
         if (clickEvent.getAction() == ClickEvent.Action.OPEN_URL) {
             String url = clickEvent.getValue();
-            if (this.minecraft != null && this.minecraft.options.chatLinks().get()) {
-                // Прямое открытие для теста, чтобы исключить ConfirmLinkScreen как причину сбоя (хотя он нужен по правилам)
-                // Если сработает - вернем экран подтверждения
+            // Безопасная проверка настроек (с try-catch на случай NPE или изменений API)
+            boolean chatLinksEnabled = true;
+            try {
+                if (this.minecraft != null) {
+                    chatLinksEnabled = this.minecraft.options.chatLinks().get();
+                }
+            } catch (Exception e) {
+                // Игнорируем ошибку получения настройки, считаем что включено по умолчанию
+            }
+
+            if (chatLinksEnabled) {
                 try {
-                    Util.getPlatform().openUri(url);
+                    // Используем ConfirmLinkScreen как положено
+                    this.minecraft.setScreen(new ConfirmLinkScreen((confirmed) -> {
+                        if (confirmed) {
+                            try {
+                                Util.getPlatform().openUri(url);
+                            } catch (Exception e) {
+                                ConquestChatMod.LOGGER.error("Failed to open URI in ConfirmScreen", e);
+                            }
+                        }
+                        this.minecraft.setScreen(this);
+                    }, url, true));
                 } catch (Exception e) {
-                    ConquestChatMod.LOGGER.error("Failed to open URI", e);
+                    ConquestChatMod.LOGGER.error("Failed to set ConfirmLinkScreen", e);
                 }
                 return true;
             }
