@@ -1,12 +1,10 @@
 package com.conquest.chat.client;
 
+import com.conquest.chat.ConquestChatMod;
 import com.conquest.chat.enums.ChatChannel;
 import com.conquest.chat.enums.ChatMessageType;
 import net.minecraft.ChatFormatting;
-import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.network.chat.Style;
-
+import net.minecraft.network.chat.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -17,15 +15,25 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ClientChatManager {
-
     private static ClientChatManager instance;
     private final Map<ChatChannel, List<Component>> messages = new HashMap<>();
     private ChatChannel activeTab = ChatChannel.ALL;
+
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
+    // Паттерны
     private static final Pattern DAMAGE_DEALT_PATTERN = Pattern.compile("Вы нанесли ([0-9.]+) урона по (.+)");
+    private static final Pattern DAMAGE_TAKEN_PATTERN = Pattern.compile("Вы получили ([0-9.]+) урона от (.+)");
     private static final Pattern KILL_PATTERN = Pattern.compile("Вы убили (.+)");
     private static final Pattern EXISTING_TIME_PATTERN = Pattern.compile("^\\[\\d{2}:\\d{2}:\\d{2}\\]");
+
+    // УЛУЧШЕННЫЙ ПАТТЕРН НИКА: Ищет "Слово:", возможно с префиксом.
+    // Пример: "[G] Nick:", "Nick:", "<Nick>"
+    // Группа 1 - это сам ник.
+    private static final Pattern NICKNAME_DETECTOR = Pattern.compile("(?<=^|\\s|\\[|\\<)([a-zA-Z0-9_]{3,16})(?=:|\\>|\\s)");
+
+    private static final Pattern TRADE_TAG_PATTERN = Pattern.compile("\\[Торг\\]", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern URL_PATTERN = Pattern.compile("https?://\\S+");
 
     private ClientChatManager() {
         for (ChatChannel channel : ChatChannel.values()) {
@@ -42,108 +50,236 @@ public class ClientChatManager {
 
     public void addMessage(ChatMessageType type, Component originalMessage) {
         String cleanText = originalMessage.getString().trim();
+        String lowerText = cleanText.toLowerCase();
+
+        ConquestChatMod.LOGGER.info("[DEBUG ChatManager] Received: " + cleanText);
 
         ChatChannel detectedChannel = ChatChannel.ALL;
-        ChatFormatting color = ChatFormatting.WHITE;
+        ChatFormatting channelColor = ChatFormatting.WHITE;
         String prefix = "";
+        boolean needCleanup = false;
 
-        // 1. ОПРЕДЕЛЯЕМ КАНАЛ
-        if (type == ChatMessageType.COMBAT || cleanText.startsWith("[COMBAT]") || DAMAGE_DEALT_PATTERN.matcher(cleanText).find()) {
+        if (type == ChatMessageType.COMBAT || cleanText.startsWith("[COMBAT]") || DAMAGE_DEALT_PATTERN.matcher(cleanText).find() || DAMAGE_TAKEN_PATTERN.matcher(cleanText).find()) {
             detectedChannel = ChatChannel.COMBAT;
-        } else if (cleanText.contains("[Торг]") || type == ChatMessageType.TRADE) {
+        } else if (lowerText.contains("[торг]") || type == ChatMessageType.TRADE) {
             detectedChannel = ChatChannel.TRADE;
-            color = ChatFormatting.BLUE; // &9
-            if (!cleanText.contains("[Торг]")) prefix = "[Торг] ";
-        } else if (cleanText.contains("шепчет") || cleanText.contains("прошептали") || type == ChatMessageType.WHISPER) {
+            channelColor = ChatFormatting.BLUE;
+            prefix = "[Торг] ";
+            needCleanup = true;
+        } else if (lowerText.contains("шепчет") || lowerText.contains("прошептали") || type == ChatMessageType.WHISPER) {
             detectedChannel = ChatChannel.WHISPER;
-            color = ChatFormatting.DARK_PURPLE; // &5
+            channelColor = ChatFormatting.DARK_PURPLE;
         } else {
             detectedChannel = ChatChannel.ALL;
-            color = ChatFormatting.WHITE;
+            channelColor = ChatFormatting.WHITE;
             if (!cleanText.startsWith("[Общий]")) prefix = "[Общий] ";
         }
 
         Component finalMessage;
 
         if (detectedChannel == ChatChannel.COMBAT) {
-            finalMessage = reformatCombatMessage(originalMessage);
+            finalMessage = reformatCombatMessage(cleanText);
         } else {
             MutableComponent messageBuilder = Component.empty();
 
-            // 2. ВРЕМЯ (Сначала время, серым цветом)
-            // [HH:mm:ss]
             if (!EXISTING_TIME_PATTERN.matcher(cleanText).find()) {
                 String timeStr = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
-                // Важно: время всегда серое, независимо от канала
                 messageBuilder.append(Component.literal(timeStr).withStyle(ChatFormatting.GRAY));
             }
 
-            // 3. ПРЕФИКС (Потом префикс, цветом канала)
-            // [Общий] / [Торг]
-            final ChatFormatting finalColor = color;
+            final ChatFormatting finalColor = channelColor;
             if (!prefix.isEmpty()) {
                 messageBuilder.append(Component.literal(prefix).withStyle(finalColor));
             }
 
-            // 4. ТЕКСТ (Потом текст, цветом канала)
-            // Никнейм: msg
-            MutableComponent contentComp = originalMessage.copy();
+            MutableComponent contentComp;
+            if (needCleanup) {
+                String textContent = originalMessage.getString();
+                String cleanedContent = TRADE_TAG_PATTERN.matcher(textContent).replaceAll("").trim();
+                cleanedContent = cleanedContent.replaceAll("  +", " ");
+                contentComp = Component.literal(cleanedContent); // ТУТ ТЕРЯЕМ ССЫЛКИ
+            } else {
+                contentComp = originalMessage.copy();
+            }
+
+            // ВОССТАНАВЛИВАЕМ ИНТЕРАКТИВНОСТЬ (Ссылки + Ники)
+            if (detectedChannel != ChatChannel.COMBAT) {
+                contentComp = processInteractivity(contentComp);
+            }
 
             if (detectedChannel != ChatChannel.ALL) {
-                // Если это спец. канал, мы хотим покрасить ВСЁ сообщение в цвет канала.
-                // Чтобы избежать сброса цвета (белый текст после синего префикса),
-                // мы применяем стиль ко всему добавленному контенту.
-
-                // Вариант А: Обернуть контент в компонент с нужным стилем
-                contentComp = Component.empty().append(contentComp).withStyle(finalColor);
+                contentComp = applyStyleRecursive(contentComp, finalColor);
             }
 
             messageBuilder.append(contentComp);
             finalMessage = messageBuilder;
         }
 
-        // 5. СОХРАНЯЕМ И ДУБЛИРУЕМ
-
-        // Добавляем в "Родной" канал
         messages.computeIfAbsent(detectedChannel, k -> new ArrayList<>()).add(finalMessage);
 
-        // Дублируем в [Общий], если это [Торг] или [Личное] (или любой другой не общий)
         if (detectedChannel != ChatChannel.ALL) {
             messages.computeIfAbsent(ChatChannel.ALL, k -> new ArrayList<>()).add(finalMessage);
         }
 
-        // Доп. требование: Дублировать [Личное] в [Торг]?
-        // В ТЗ было: "добавь дублирование текста во вкладку [Торг]".
-        // Если ты имел в виду, что сообщения из Общего должны попадать в Торг - это странно.
-        // Если ты имел в виду, что сообщения из Торг должны попадать в Общий - это уже сделано выше.
-        // Если ты имел в виду, что сообщения, отправленные В ТОРГ, должны отображаться В ТОРГЕ - это первая строка (add native).
-
-        // На всякий случай, если ты хочешь видеть ВСЕ сообщения во вкладке Торг (как в Общем):
-        // (Обычно так не делают, но если надо - раскомментируй)
-        // if (detectedChannel == ChatChannel.ALL) {
-        //     messages.computeIfAbsent(ChatChannel.TRADE, k -> new ArrayList<>()).add(finalMessage);
-        // }
+        if (detectedChannel == ChatChannel.WHISPER) {
+            messages.computeIfAbsent(ChatChannel.TRADE, k -> new ArrayList<>()).add(finalMessage);
+        }
 
         trimHistory(ChatChannel.ALL);
         trimHistory(detectedChannel);
-        // Если добавляли дубликаты, триммим и их
-        if (detectedChannel != ChatChannel.ALL) trimHistory(ChatChannel.ALL);
     }
 
-    // ... reformatCombatMessage и прочие методы без изменений ...
+    // Новый метод обработки ссылок и ников
+    private MutableComponent processInteractivity(MutableComponent root) {
+        // Рекурсивно или плоско? Лучше плоско создать новый компонент, если текст содержит ссылки.
+        // Но это сложно, если компонент уже имеет структуру.
+        // Простой вариант: Пройтись по plain text и, если находим совпадения, разбивать на части.
 
-    private Component reformatCombatMessage(Component msg) {
-        String text = msg.getString().replace("[COMBAT] ", "").trim();
-        String time = LocalTime.now().format(TIME_FORMATTER);
+        // Попробуем упрощенный вариант:
+        // Если компонент - это просто текст без событий, проверим его.
+
+        return processComponentText(root);
+    }
+
+    private MutableComponent processComponentText(MutableComponent comp) {
+        String text = comp.getString();
+        List<Component> siblings = comp.getSiblings();
+        Style style = comp.getStyle();
+
+        if (!siblings.isEmpty()) {
+            MutableComponent newComp = comp.plainCopy().setStyle(style);
+            for (Component child : siblings) {
+                if (child instanceof MutableComponent mc) {
+                    newComp.append(processComponentText(mc));
+                } else {
+                    newComp.append(child);
+                }
+            }
+            return newComp;
+        }
+
+        if (style.getClickEvent() != null) return comp;
+
+        List<Component> parts = new ArrayList<>();
+        // УПРОЩЕННЫЙ ПАТТЕРН: Ищем ник перед двоеточием или >
+        // Группа 1: Ник
+        Matcher nickMatcher = Pattern.compile("([a-zA-Z0-9_]{3,16})(?=:|>)").matcher(text);
+        // Добавим URL
+        Matcher urlMatcher = URL_PATTERN.matcher(text);
+
+        // Приоритет URL
+        if (urlMatcher.find()) {
+            urlMatcher.reset();
+            int lastIdx = 0;
+            while (urlMatcher.find()) {
+                String before = text.substring(lastIdx, urlMatcher.start());
+                if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
+
+                String url = urlMatcher.group();
+                parts.add(Component.literal(url).withStyle(style.withColor(ChatFormatting.BLUE).withUnderlined(true)
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, url))));
+                lastIdx = urlMatcher.end();
+            }
+            if (lastIdx < text.length()) parts.add(Component.literal(text.substring(lastIdx)).withStyle(style));
+
+            MutableComponent result = Component.empty();
+            for (Component p : parts) result.append(p);
+            return result;
+        }
+
+        if (nickMatcher.find()) {
+            ConquestChatMod.LOGGER.info("[DEBUG] Found nickname match in text: " + text);
+            nickMatcher.reset();
+            int lastIdx = 0;
+            while (nickMatcher.find()) {
+                String before = text.substring(lastIdx, nickMatcher.start());
+                if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
+
+                String nick = nickMatcher.group(1);
+
+                // СТИЛЬ НИКА
+                Style nickStyle = style
+                        .withColor(ChatFormatting.YELLOW) // Для теста покрасим в желтый
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, "/w " + nick + " "))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal("ПКМ: ЛС | ЛКМ: Упомянуть")));
+
+                parts.add(Component.literal(nick).withStyle(nickStyle));
+
+                lastIdx = nickMatcher.end(); // Мы берем только ник, двоеточие останется в след. части или будет съедено?
+                // Паттерн (?=:) - это lookahead, он НЕ захватывает двоеточие. Оно останется в тексте.
+            }
+            if (lastIdx < text.length()) {
+                parts.add(Component.literal(text.substring(lastIdx)).withStyle(style));
+            }
+
+            MutableComponent result = Component.empty();
+            for (Component p : parts) result.append(p);
+            return result;
+        }
+
+        return comp;
+    }
+
+    private MutableComponent applyStyleRecursive(MutableComponent comp, ChatFormatting color) {
+        Style oldStyle = comp.getStyle();
+        // Не перезаписываем цвет, если он уже есть и отличается от дефолтного?
+        // Нет, требование - менять цвет канала. Но ссылки должны оставаться синими.
+        if (oldStyle.getClickEvent() != null && oldStyle.getClickEvent().getAction() == ClickEvent.Action.OPEN_URL) {
+            return comp; // Не красим ссылки в цвет канала
+        }
+
+        Style newStyle = oldStyle.applyFormat(color);
+        MutableComponent newComp = comp.copy().setStyle(newStyle);
+        newComp.getSiblings().clear(); // Очищаем старых детей, так как добавим новых рекурсивно
+
+        for (Component child : comp.getSiblings()) {
+            if (child instanceof MutableComponent mutableChild) {
+                newComp.append(applyStyleRecursive(mutableChild, color));
+            } else {
+                newComp.append(child);
+            }
+        }
+        return newComp;
+    }
+
+    private Component reformatCombatMessage(String text) {
+        text = text.replace("[COMBAT] ", "").trim();
+        String time = "[" + LocalTime.now().format(TIME_FORMATTER) + "] ";
+        MutableComponent builder = Component.literal(time).withStyle(ChatFormatting.GRAY);
+
         Matcher mDealt = DAMAGE_DEALT_PATTERN.matcher(text);
         if (mDealt.find()) {
-            return Component.literal(String.format("[%s] [Урон. Исходящий]: Вы ранили %s (%s)", time, mDealt.group(2), mDealt.group(1))).withStyle(ChatFormatting.RED);
+            String dmg = mDealt.group(1);
+            String entity = mDealt.group(2);
+            builder.append(Component.literal("[Урон. Исходящий]: ").withStyle(ChatFormatting.RED));
+            builder.append(Component.literal("Вы ранили ").withStyle(ChatFormatting.RED));
+            builder.append(Component.literal(entity).withStyle(ChatFormatting.YELLOW));
+            builder.append(Component.literal(" (" + dmg + ")").withStyle(ChatFormatting.RED));
+            return builder;
         }
+
+        Matcher mTaken = DAMAGE_TAKEN_PATTERN.matcher(text);
+        if (mTaken.find()) {
+            String dmg = mTaken.group(1);
+            String source = mTaken.group(2);
+            builder.append(Component.literal("[Урон. Входящий]: ").withStyle(ChatFormatting.RED));
+            builder.append(Component.literal("Вы получили ").withStyle(ChatFormatting.RED));
+            builder.append(Component.literal("(" + dmg + ")").withStyle(ChatFormatting.YELLOW));
+            builder.append(Component.literal(" ед. урона от ").withStyle(ChatFormatting.RED));
+            builder.append(Component.literal(source).withStyle(ChatFormatting.YELLOW));
+            return builder;
+        }
+
         Matcher mKill = KILL_PATTERN.matcher(text);
         if (mKill.find()) {
-            return Component.literal(String.format("[%s] [Урон. Исходящий]: Вы убили %s", time, mKill.group(1))).withStyle(ChatFormatting.GOLD);
+            String entity = mKill.group(1);
+            builder.append(Component.literal("[Урон. Исходящий]: ").withStyle(ChatFormatting.GOLD));
+            builder.append(Component.literal("Вы убили ").withStyle(ChatFormatting.GOLD));
+            builder.append(Component.literal(entity).withStyle(ChatFormatting.YELLOW));
+            return builder;
         }
-        return Component.literal("[" + time + "] " + text).withStyle(ChatFormatting.RED);
+
+        return Component.literal(time + text).withStyle(ChatFormatting.RED);
     }
 
     private void trimHistory(ChatChannel channel) {
@@ -151,14 +287,8 @@ public class ClientChatManager {
         if (list != null && list.size() > 100) list.remove(0);
     }
 
-    public List<Component> getMessages(String channelName) {
-        return getMessagesForTab(mapStringToChannel(channelName));
-    }
-
-    public List<Component> getMessagesForTab(ChatChannel tab) {
-        ChatChannel target = (tab == null) ? activeTab : tab;
-        return messages.getOrDefault(target, new ArrayList<>());
-    }
+    public List<Component> getMessages(String channelName) { return getMessagesForTab(mapStringToChannel(channelName)); }
+    public List<Component> getMessagesForTab(ChatChannel tab) { ChatChannel target = (tab == null) ? activeTab : tab; return messages.getOrDefault(target, new ArrayList<>()); }
 
     private ChatChannel mapStringToChannel(String name) {
         switch (name) {
