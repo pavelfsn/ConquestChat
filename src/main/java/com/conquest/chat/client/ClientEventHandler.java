@@ -10,6 +10,7 @@ import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.event.ScreenEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.fml.common.Mod;
 
 import java.util.List;
@@ -42,6 +43,13 @@ public class ClientEventHandler {
                 }
 
                 event.setNewScreen(new CustomChatScreen(defaultText));
+            }
+        }
+
+        @SubscribeEvent
+        public static void onRenderGuiOverlayPre(RenderGuiOverlayEvent.Pre event) {
+            if (event.getOverlay().id().equals(VanillaGuiOverlay.CHAT_PANEL.id())) {
+                event.setCanceled(true);
             }
         }
 

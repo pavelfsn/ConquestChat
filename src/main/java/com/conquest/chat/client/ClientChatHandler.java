@@ -14,19 +14,7 @@ public class ClientChatHandler {
 
     @SubscribeEvent
     public static void onClientChatReceived(ClientChatReceivedEvent event) {
-        /*
-         * Ключевая правка:
-         * - системные сообщения (ответы на команды, ошибки, контекст Brigadier и т.п.) -> ChatMessageType.SYSTEM
-         * - обычный чат игроков -> ChatMessageType.GENERAL
-         */
-
-        Component message = event.getMessage();
-        UUID sender = event.getSender(); // зарезервировано на будущее
-
-        ChatMessageType type = event.isSystem() ? ChatMessageType.SYSTEM : ChatMessageType.GENERAL;
-        ClientChatManager.getInstance().addMessage(type, message);
-
-        // Отключаем ванильный чат, чтобы не было дублей
-        event.setCanceled(true);
+        // Всё маршрутизируется Mixin'ом из ChatComponent#addMessage(...)
+        // Здесь ничего не делаем и НЕ cancel'им событие, иначе часть сообщений может пропасть.
     }
 }

@@ -3,13 +3,26 @@ package com.conquest.chat.client;
 import com.conquest.chat.enums.ChatMessageType;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
-import net.minecraft.network.chat.*;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
 import net.minecraft.network.chat.contents.LiteralContents;
 import net.minecraft.network.chat.contents.TranslatableContents;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +40,7 @@ public class ClientChatManager {
 
     private static final Pattern URL_PATTERN =
             Pattern.compile("https?://[\\w\\.\\-]+\\w{2,}(/[\\w\\.\\-?&=%+]*)?");
+
     private static final Pattern NICK_PATTERN =
             Pattern.compile("(?<=<|\\s|^)([a-zA-Z0-9_]{3,16})(?=:|>|\\s)");
 
@@ -143,9 +157,10 @@ public class ClientChatManager {
             prefixText = "[Система] ";
             prefixColor = ChatFormatting.RED;
         } else {
-            String cleanText = ChatFormatting.stripFormatting(rawText).trim();
-            boolean hasPrefix = cleanText.startsWith("[");
+            String cleanText = ChatFormatting.stripFormatting(rawText);
+            cleanText = (cleanText == null) ? "" : cleanText.trim();
 
+            boolean hasPrefix = cleanText.startsWith("[");
             if (!hasPrefix) {
                 prefixText = "[Общий] ";
                 prefixColor = ChatFormatting.WHITE;
@@ -184,6 +199,8 @@ public class ClientChatManager {
     }
 
     private MutableComponent removeTextFromComponent(MutableComponent comp, String target) {
+        if (comp == null) return Component.empty();
+
         if (comp.getContents() instanceof TranslatableContents) {
             String text = comp.getString();
             if (text.contains(target)) {
@@ -268,6 +285,7 @@ public class ClientChatManager {
 
         List<Component> out = new ArrayList<>();
         Iterator<HudEntry> it = hudMessages.descendingIterator();
+
         while (it.hasNext() && out.size() < maxLines) {
             HudEntry e = it.next();
             if (tab.equals(e.tab)) {
@@ -309,67 +327,43 @@ public class ClientChatManager {
             return Component.literal(text).withStyle(style);
         }
 
-        List<Component> parts = new ArrayList<>();
-        Matcher nickMatcher = NICK_PATTERN.matcher(text);
-        Matcher urlMatcher = URL_PATTERN.matcher(text);
+        // ==========================
+        // FPS/GC: быстрые выходы
+        // ==========================
+        boolean mayContainUrl = text.indexOf("http://") >= 0 || text.indexOf("https://") >= 0;
 
-        // URL
-        if (urlMatcher.find()) {
-            urlMatcher.reset();
-            int lastIdx = 0;
+        // Ники ожидаются в форматах "<Nick>" / "Nick:" / "... Nick ..."
+        // (в контексте твоего NICK_PATTERN lookbehind/lookahead) — если нет ни одного из маркеров,
+        // можно пропускать regex и вернуть literal.
+        boolean mayContainNickMarkers = (text.indexOf('<') >= 0) || (text.indexOf('>') >= 0) || (text.indexOf(':') >= 0);
 
-            while (urlMatcher.find()) {
-                String before = text.substring(lastIdx, urlMatcher.start());
-                if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
-
-                String url = urlMatcher.group();
-                parts.add(Component.literal(url).withStyle(
-                        style.withColor(ChatFormatting.BLUE)
-                                .withUnderlined(true)
-                                .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, url))
-                ));
-
-                lastIdx = urlMatcher.end();
-            }
-
-            if (lastIdx < text.length()) {
-                parts.add(Component.literal(text.substring(lastIdx)).withStyle(style));
-            }
-
-            MutableComponent result = Component.empty();
-            for (Component p : parts) result.append(p);
-            return result;
+        if (!mayContainUrl && !mayContainNickMarkers) {
+            return Component.literal(text).withStyle(style);
         }
 
-        // Ники
-        if (nickMatcher.find()) {
-            nickMatcher.reset();
-            int lastIdx = 0;
-            boolean found = false;
+        // URL
+        if (mayContainUrl) {
+            Matcher urlMatcher = URL_PATTERN.matcher(text);
+            if (urlMatcher.find()) {
+                urlMatcher.reset();
 
-            while (nickMatcher.find()) {
-                String nick = nickMatcher.group(1);
+                List<Component> parts = new ArrayList<>();
+                int lastIdx = 0;
 
-                // отсев “шумных” матчей
-                if (nick.equals(nick.toUpperCase()) && nick.length() > 4) continue;
+                while (urlMatcher.find()) {
+                    String before = text.substring(lastIdx, urlMatcher.start());
+                    if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
 
-                found = true;
+                    String url = urlMatcher.group();
+                    parts.add(Component.literal(url).withStyle(
+                            style.withColor(ChatFormatting.BLUE)
+                                    .withUnderlined(true)
+                                    .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, url))
+                    ));
 
-                String before = text.substring(lastIdx, nickMatcher.start());
-                if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
+                    lastIdx = urlMatcher.end();
+                }
 
-                Style nickStyle = style
-                        .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, "/w " + nick + " "))
-                        .withHoverEvent(new HoverEvent(
-                                HoverEvent.Action.SHOW_TEXT,
-                                Component.literal("§eПКМ: Меню\n§7ЛКМ: Упомянуть")
-                        ));
-
-                parts.add(Component.literal(nick).withStyle(nickStyle));
-                lastIdx = nickMatcher.end();
-            }
-
-            if (found) {
                 if (lastIdx < text.length()) {
                     parts.add(Component.literal(text.substring(lastIdx)).withStyle(style));
                 }
@@ -377,6 +371,50 @@ public class ClientChatManager {
                 MutableComponent result = Component.empty();
                 for (Component p : parts) result.append(p);
                 return result;
+            }
+        }
+
+        // Ники
+        if (mayContainNickMarkers) {
+            Matcher nickMatcher = NICK_PATTERN.matcher(text);
+            if (nickMatcher.find()) {
+                nickMatcher.reset();
+
+                List<Component> parts = new ArrayList<>();
+                int lastIdx = 0;
+                boolean found = false;
+
+                while (nickMatcher.find()) {
+                    String nick = nickMatcher.group(1);
+
+                    // отсев “шумных” матчей
+                    if (nick.equals(nick.toUpperCase()) && nick.length() > 4) continue;
+
+                    found = true;
+
+                    String before = text.substring(lastIdx, nickMatcher.start());
+                    if (!before.isEmpty()) parts.add(Component.literal(before).withStyle(style));
+
+                    Style nickStyle = style
+                            .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, "/w " + nick + " "))
+                            .withHoverEvent(new HoverEvent(
+                                    HoverEvent.Action.SHOW_TEXT,
+                                    Component.literal("§eПКМ: Меню\n§7ЛКМ: Упомянуть")
+                            ));
+
+                    parts.add(Component.literal(nick).withStyle(nickStyle));
+                    lastIdx = nickMatcher.end();
+                }
+
+                if (found) {
+                    if (lastIdx < text.length()) {
+                        parts.add(Component.literal(text.substring(lastIdx)).withStyle(style));
+                    }
+
+                    MutableComponent result = Component.empty();
+                    for (Component p : parts) result.append(p);
+                    return result;
+                }
             }
         }
 
