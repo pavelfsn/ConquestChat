@@ -1,10 +1,12 @@
 package com.conquest.chat.client;
 
 import com.conquest.chat.ConquestChatMod;
+import com.conquest.chat.config.ChatConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.FormattedCharSequence;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderGuiOverlayEvent;
@@ -55,6 +57,7 @@ public class ClientEventHandler {
 
         @SubscribeEvent
         public static void onRenderGuiOverlay(RenderGuiOverlayEvent.Post event) {
+            int maxTextWidth = ChatConfig.CLIENT.chatWidth.get() - 12 - 4;
             Minecraft mc = Minecraft.getInstance();
             if (mc.player == null) return;
 
@@ -74,11 +77,14 @@ public class ClientEventHandler {
             int lineH = mc.font.lineHeight + 1;
 
             // Рисуем “над хотбаром”
-            int y = mc.getWindow().getGuiScaledHeight() - 40 - (lines.size() * lineH);
+            int y = mc.getWindow().getGuiScaledHeight() - 40 - (maxLines * lineH);
 
             for (Component c : lines) {
-                gg.drawString(mc.font, c, x, y, 0xFFFFFFFF, true);
-                y += lineH;
+                List<FormattedCharSequence> wrapped = mc.font.split(c, maxTextWidth);
+                for (FormattedCharSequence w : wrapped) {
+                    gg.drawString(mc.font, w, x, y, 0xFFFFFFFF, true);
+                    y += lineH;
+                }
             }
         }
     }

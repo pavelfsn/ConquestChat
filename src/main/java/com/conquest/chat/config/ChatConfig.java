@@ -24,26 +24,28 @@ public class ChatConfig {
         public Client(ForgeConfigSpec.Builder builder) {
             builder.push("general");
 
+            // Ближе к референсу: уже и выше
             chatWidth = builder.comment("Ширина окна чата")
-                    .defineInRange("chatWidth", 320, 200, 1000);
+                    .defineInRange("chatWidth", 240, 200, 1000);
 
             chatHeight = builder.comment("Высота окна чата")
-                    .defineInRange("chatHeight", 180, 100, 1000);
+                    .defineInRange("chatHeight", 240, 100, 1000);
 
             fadeDuration = builder.comment("Длительность анимации появления (мс)")
-                    .defineInRange("fadeDuration", 100, 0, 2000);
+                    .defineInRange("fadeDuration", 150, 0, 2000);
 
             activeTabColor = builder.comment("Цвет активной вкладки (ARGB Hex)")
-                    .define("activeTabColor", "#FFFFFFFF"); // Белый
+                    .define("activeTabColor", "#FFFFFFFF");
 
             inactiveTabColor = builder.comment("Цвет неактивной вкладки (ARGB Hex)")
-                    .define("inactiveTabColor", "#FFAAAAAA"); // Серый
+                    .define("inactiveTabColor", "#FFAAAAAA");
 
             backgroundColor = builder.comment("Цвет фона чата (ARGB Hex)")
-                    .define("backgroundColor", "#80000000"); // Полупрозрачный черный
+                    .define("backgroundColor", "#80000000");
 
             builder.pop();
         }
+
     }
 
     // Вспомогательный метод для парсинга цвета

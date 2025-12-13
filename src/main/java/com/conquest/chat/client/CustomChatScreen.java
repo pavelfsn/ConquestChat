@@ -1,10 +1,15 @@
 package com.conquest.chat.client;
 
-import com.conquest.chat.ConquestChatMod;
+import com.conquest.chat.channel.ChannelType;
+import com.conquest.chat.client.ui.ChatNineSlice;
+import com.conquest.chat.client.ui.ChatTextures;
 import com.conquest.chat.config.ChatConfig;
 import com.conquest.chat.enums.ChatMessageType;
+import com.conquest.chat.network.ChatMessagePacket;
+import com.conquest.chat.network.NetworkHandler;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.CommandSuggestions;
 import net.minecraft.client.gui.screens.ChatScreen;
@@ -19,18 +24,15 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.lwjgl.glfw.GLFW;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-
 import java.util.Comparator;
-import java.util.regex.Pattern;
-import java.util.Map;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
-import com.conquest.chat.channel.ChannelType;
-import com.conquest.chat.network.ChatMessagePacket;
-import com.conquest.chat.network.NetworkHandler;
+import java.util.regex.Pattern;
 
 @OnlyIn(Dist.CLIENT)
 public class CustomChatScreen extends ChatScreen {
@@ -49,8 +51,8 @@ public class CustomChatScreen extends ChatScreen {
     private boolean isDraggingScrollbar = false;
 
     private final ClientChatManager chatManager = ClientChatManager.getInstance();
-    private CommandSuggestions customCommandSuggestions;
 
+    private CommandSuggestions customCommandSuggestions;
     private final List<ClickArea> clickAreas = new ArrayList<>();
 
     // --- КОНТЕКСТНОЕ МЕНЮ ---
@@ -62,7 +64,6 @@ public class CustomChatScreen extends ChatScreen {
     // ---------------------------
     // Двухслойный ввод предметов
     // ---------------------------
-
     private static final class PendingItem {
         int start;
         int end;
@@ -82,7 +83,6 @@ public class CustomChatScreen extends ChatScreen {
     private final List<PendingItem> pendingItems = new ArrayList<>();
     private String lastInputValue = "";
 
-
     // TAB hold state (чтобы TAB работал по удержанию, а не как toggle)
     private boolean tabHeld = false;
 
@@ -97,77 +97,218 @@ public class CustomChatScreen extends ChatScreen {
     private int cachedMaxTextWidth = -1;
     private int cachedMsgCount = -1;
 
+    // ======= WRAP FIX (class-level) =======
+
+    private List<FormattedCharSequence> wrapMessage(Component component, int maxWidthPx) {
+        Font font = this.font;
+        List<FormattedCharSequence> base = font.split(component, maxWidthPx); // split by width [web:451]
+
+        ArrayList<FormattedCharSequence> fixed = new ArrayList<>();
+        for (FormattedCharSequence seq : base) {
+            if (font.width(seq) <= maxWidthPx) { // [web:451]
+                fixed.add(seq);
+            } else {
+                fixed.addAll(breakLongWord(seq, maxWidthPx));
+            }
+        }
+        return fixed;
+    }
+
+    private List<FormattedCharSequence> breakLongWord(FormattedCharSequence seq, int maxWidthPx) {
+        Font font = this.font;
+        String raw = seq.toString();
+
+        ArrayList<FormattedCharSequence> out = new ArrayList<>();
+        int i = 0;
+
+        while (i < raw.length()) {
+            int j = i + 1;
+            int lastFit = j;
+
+            while (j <= raw.length()) {
+                String sub = raw.substring(i, j);
+                if (font.width(sub) <= maxWidthPx) { // [web:451]
+                    lastFit = j;
+                    j++;
+                } else {
+                    break;
+                }
+            }
+
+            if (lastFit <= i) lastFit = Math.min(i + 1, raw.length());
+            String chunk = raw.substring(i, lastFit);
+
+            out.add(FormattedCharSequence.forward(chunk, Style.EMPTY));
+            i = lastFit;
+        }
+
+        return out;
+    }
+
+// ======= END WRAP FIX =======
+
+
     public CustomChatScreen(String initialMessage) {
         super(initialMessage);
         this.openTime = System.currentTimeMillis();
     }
 
+    // ---------------------------
+    // Layout helpers
+    // ---------------------------
+    private int chatX() {
+        return 4;
+    }
+
+    private int chatW() {
+        return ChatConfig.CLIENT.chatWidth.get();
+    }
+
+    private int chatH() {
+        return ChatConfig.CLIENT.chatHeight.get();
+    }
+
+    private int chatY() {
+        return this.height - chatH() - 4;
+    }
+
+    private int messageTopY(int y) {
+        return y + TAB_HEIGHT + 2;
+    }
+
+    private int messageBottomY(int y, int height) {
+        return y + height - 16; // область до инпута
+    }
+
+    private boolean isInsideChatPanel(double mouseX, double mouseY) {
+        int x = chatX();
+        int y = chatY();
+        int w = chatW();
+        int h = chatH();
+        return mouseX >= x && mouseX < x + w && mouseY >= y && mouseY < y + h;
+    }
+
+    private boolean isInsideMessagesArea(double mouseX, double mouseY) {
+        int x = chatX();
+        int y = chatY();
+        int w = chatW();
+        int h = chatH();
+        return mouseX >= x
+                && mouseX < x + w
+                && mouseY >= messageTopY(y)
+                && mouseY <= messageBottomY(y, h);
+    }
+
+    private void applyChatLayout() {
+        int chatWidth = chatW();
+        int chatHeight = chatH();
+        int x = chatX();
+        int y = chatY();
+
+        // ---- input field geometry (рисуем фон отдельно, EditBox — внутри с padding) ----
+        int inputFieldX = x + 4;
+        int inputFieldY = y + chatHeight - 16 + 1;
+        int inputFieldW = chatWidth - 8;
+
+        // сам EditBox (текст) — с внутренними отступами, чтобы совпасть с рефом
+        this.input.setX(inputFieldX + 4);
+        this.input.setY(inputFieldY + 3);
+        this.input.setWidth(inputFieldW - 8);
+
+        this.input.setBordered(false);
+        this.input.setMaxLength(256);
+        this.input.setTextColor(0xFFFFFFFF);
+
+        if (this.minecraft == null || this.font == null) {
+            this.customCommandSuggestions = null;
+            return;
+        }
+
+        // ВАЖНО: sx/sy — точка привязки для подсказок.
+        // Они всё равно будут зажаты scissor'ом внутри панели чата.
+        int sx = this.input.getX();
+        int sy = this.input.getY() - (this.font.lineHeight + 2);
+
+        this.customCommandSuggestions = new CommandSuggestions(
+                this.minecraft, this, this.input, this.font,
+                false, false,
+                sx, sy,
+                false,
+                0xD0000000
+        );
+        this.customCommandSuggestions.setAllowSuggestions(true);
+        this.customCommandSuggestions.updateCommandInfo();
+    }
+
     @Override
     protected void init() {
         this.currentTab = chatManager.getActiveTabName();
-
-        // Исправляем дефолтную вкладку, если вдруг она была "Торг" в памяти
-        if (this.currentTab == null || this.currentTab.equals("Торг")) {
+        if (this.currentTab == null || this.currentTab.isEmpty()) {
             this.currentTab = "Общий";
             chatManager.setActiveTabName("Общий");
         }
 
         super.init();
+        applyChatLayout();
 
-        int chatWidth = ChatConfig.CLIENT.chatWidth.get();
-        int chatHeight = ChatConfig.CLIENT.chatHeight.get();
-        int x = 4;
-        int y = this.height - chatHeight - 4;
-
-        this.input.setX(x + 4);
-        this.input.setY(y + chatHeight - 13);
-        this.input.setWidth(chatWidth - 8);
-        this.input.setBordered(false);
-        this.input.setMaxLength(256);
-        this.input.setTextColor(0xFFFFFFFF);
-
-        this.customCommandSuggestions = new CommandSuggestions(
-                this.minecraft,
-                this,
-                this.input,
-                this.font,
-                false,
-                false,
-                0,
-                7,
-                false,
-                -805306368
-        );
-        this.customCommandSuggestions.setAllowSuggestions(true);
-        this.customCommandSuggestions.updateCommandInfo();
-
-        // Hook: item-picker сообщает о вставке диапазона в input
         this.itemPicker.setOnInsert(this::onItemInserted);
 
-
         this.input.setResponder((text) -> {
-
-            // Поддерживаем привязанные диапазоны предметов
             onInputChanged(text);
-
             if (this.customCommandSuggestions != null) {
                 this.customCommandSuggestions.updateCommandInfo();
             }
-
         });
 
         lastInputValue = this.input.getValue();
-
         invalidateWrappedCache();
     }
 
     @Override
     public void resize(Minecraft minecraft, int width, int height) {
         super.resize(minecraft, width, height);
-        if (this.customCommandSuggestions != null) {
-            this.customCommandSuggestions.updateCommandInfo();
-        }
+        applyChatLayout();
         invalidateWrappedCache();
+    }
+
+    // ---------------------------
+    // Rendering helpers (textures)
+    // ---------------------------
+    private void drawPanel(GuiGraphics g, int x, int y, int w, int h) {
+        g.setColor(1f, 1f, 1f, animationAlpha);
+        ChatNineSlice.blit9(g, ChatTextures.PANEL_9, x, y, w, h, 2, 32, 32);
+        g.setColor(1f, 1f, 1f, 1f);
+    }
+
+    private void drawTab(GuiGraphics g, int x, int y, int w, int h, boolean active, boolean hovered) {
+        // базовая таб-кнопка
+        float a = animationAlpha * (active ? 1.0f : (hovered ? 0.90f : 0.75f));
+        g.setColor(1f, 1f, 1f, a);
+
+        var tex = active ? ChatTextures.TAB_ACTIVE_9 : ChatTextures.TAB_INACTIVE_9;
+        // border=2 чтобы рамка была тонкой как в рефе
+        ChatNineSlice.blit9(g, tex, x, y, w, h, 2, 32, 16);
+
+        g.setColor(1f, 1f, 1f, 1f);
+
+        // нижняя полоска активной вкладки
+        if (active) {
+            int y0 = y + h - 2;
+            g.hLine(x + 3, x + w - 4, y0, 0xCCFFFFFF);
+        }
+    }
+
+    private void drawScrollTrack(GuiGraphics g, int x, int y, int w, int h) {
+        g.setColor(1f, 1f, 1f, animationAlpha);
+        // используем nine-slice как безопасное растягивание маленькой текстуры
+        ChatNineSlice.blit9(g, ChatTextures.SCROLL_TRACK, x, y, w, h, 1, 4, 32);
+        g.setColor(1f, 1f, 1f, 1f);
+    }
+
+    private void drawScrollThumb(GuiGraphics g, int x, int y, int w, int h) {
+        g.setColor(1f, 1f, 1f, animationAlpha);
+        ChatNineSlice.blit9(g, ChatTextures.SCROLL_THUMB, x, y, w, h, 1, 4, 16);
+        g.setColor(1f, 1f, 1f, 1f);
     }
 
     @Override
@@ -176,49 +317,64 @@ public class CustomChatScreen extends ChatScreen {
         float duration = ChatConfig.CLIENT.fadeDuration.get();
         this.animationAlpha = duration > 0 ? Mth.clamp(elapsed / duration, 0.0f, 1.0f) : 1.0f;
 
-        int bgColor = 0xFF000000;
-        int bgAlpha = 200;
-        int finalBgColor = ((int) (bgAlpha * animationAlpha) << 24) | (bgColor & 0x00FFFFFF);
+        int width = chatW();
+        int height = chatH();
+        int x = chatX();
+        int y = chatY();
 
-        int width = ChatConfig.CLIENT.chatWidth.get();
-        int height = ChatConfig.CLIENT.chatHeight.get();
-        int x = 4;
-        int y = this.height - height - 4;
+        // Background panel
+        drawPanel(graphics, x, y, width, height);
 
-        graphics.fill(x, y, x + width, y + height, finalBgColor);
-        graphics.fill(x, y, x + width, y + TAB_HEIGHT, 0xAA000000);
-
+        drawCorners(graphics, x, y, width, height, animationAlpha);
+        // Tabs
         renderTabs(graphics, mouseX, mouseY, x, y, width);
 
-        graphics.enableScissor(x, y + TAB_HEIGHT + 2, x + width, y + height - 16);
+        // Messages area (clipped)
+        graphics.enableScissor(x, messageTopY(y), x + width, messageBottomY(y, height));
         this.clickAreas.clear();
-        renderMessages(graphics, mouseX, mouseY, x, y + TAB_HEIGHT + 2, width, height - TAB_HEIGHT - 16);
+        renderMessages(graphics, mouseX, mouseY, x, messageTopY(y), width, height - TAB_HEIGHT - 16);
         graphics.disableScissor();
 
         renderSettingsButton(graphics, mouseX, mouseY, x, y);
 
-        // input + suggestions (кроме "Урон")
+        // Input + suggestions (кроме "Урон")
         if (!"Урон".equals(currentTab)) {
             int inputLineY = y + height - 16;
-            graphics.fill(x, inputLineY, x + width, inputLineY + 1, 0x44FFFFFF);
 
+            // верхний разделитель над инпутом
+            graphics.hLine(x + 3, x + width - 4, inputLineY, 0x55FFFFFF);
+
+            // фон поля ввода (рамка + подложка)
+            int inputFieldX = x + 4;
+            int inputFieldY = inputLineY + 1;
+            int inputFieldW = width - 8;
+            int inputFieldH = 14;
+
+            graphics.setColor(1f, 1f, 1f, animationAlpha);
+            ChatNineSlice.blit9(graphics, ChatTextures.INPUT_FIELD_9,
+                    inputFieldX, inputFieldY, inputFieldW, inputFieldH,
+                    2, 32, 16);
+            graphics.setColor(1f, 1f, 1f, 1f);
+
+            // EditBox (текст) + подсказки
             RenderSystem.setShaderColor(1f, 1f, 1f, animationAlpha);
             this.input.render(graphics, mouseX, mouseY, partialTick);
 
             if (this.customCommandSuggestions != null) {
+                graphics.enableScissor(x, y, x + width, y + height);
                 this.customCommandSuggestions.render(graphics, mouseX, mouseY);
+                graphics.disableScissor();
             }
         } else {
             graphics.drawString(this.font, "Только чтение", x + 4, y + height - 12, 0xFFAAAAAA, false);
         }
 
-        // overlay всегда поверх (не внутри suggestions)
+        // Overlay всегда поверх
         if (itemPicker.isOpen()) {
-            int chatWidth = ChatConfig.CLIENT.chatWidth.get();
-            int chatHeight = ChatConfig.CLIENT.chatHeight.get();
-            int chatX = 4;
-            int chatY = this.height - chatHeight - 4;
-
+            int chatWidth = chatW();
+            int chatHeight = chatH();
+            int chatX = chatX();
+            int chatY = chatY();
             itemPicker.layout(chatX, chatY, chatWidth, chatHeight, this.width, this.height);
             itemPicker.render(graphics, mouseX, mouseY, partialTick);
         }
@@ -237,25 +393,83 @@ public class CustomChatScreen extends ChatScreen {
         }
 
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+        graphics.setColor(1f, 1f, 1f, 1f);
+    }
+
+    private void drawCorners(GuiGraphics g, int x, int y, int w, int h, float alpha) {
+        int s = 12;     // размер corner_12.png
+        int pad = 2;    // отступ от краёв панели, подгоняется под глаз
+
+        g.setColor(1f, 1f, 1f, alpha);
+
+        // TL
+        g.blit(ChatTextures.CORNER_12, x + pad, y + pad, 0, 0, s, s, s, s);
+
+        // TR (отзеркалить по X)
+        g.pose().pushPose();
+        g.pose().translate(x + w - pad, y + pad, 0);
+        g.pose().scale(-1f, 1f, 1f);
+        g.blit(ChatTextures.CORNER_12, 0, 0, 0, 0, s, s, s, s);
+        g.pose().popPose();
+
+        // BL (отзеркалить по Y)
+        g.pose().pushPose();
+        g.pose().translate(x + pad, y + h - pad, 0);
+        g.pose().scale(1f, -1f, 1f);
+        g.blit(ChatTextures.CORNER_12, 0, 0, 0, 0, s, s, s, s);
+        g.pose().popPose();
+
+        // BR (отзеркалить по X и Y)
+        g.pose().pushPose();
+        g.pose().translate(x + w - pad, y + h - pad, 0);
+        g.pose().scale(-1f, -1f, 1f);
+        g.blit(ChatTextures.CORNER_12, 0, 0, 0, 0, s, s, s, s);
+        g.pose().popPose();
+
+        g.setColor(1f, 1f, 1f, 1f);
     }
 
     private void renderTabs(GuiGraphics graphics, int mouseX, int mouseY, int x, int y, int width) {
+        // общий фон/полоса для ряда вкладок как в рефе
+        graphics.setColor(1f, 1f, 1f, animationAlpha);
+        ChatNineSlice.blit9(graphics, ChatTextures.TAB_ROW_BG_9, x + 4, y + 1, width - 8, TAB_HEIGHT, 2, 32, 16);
+        graphics.setColor(1f, 1f, 1f, 1f);
+
         String[] tabs = {"Общий", "Торговый", "Личное", "Урон"};
-        int tabX = x + 24;
+
+        int tabX = x + 8;
         int tabPadding = 8;
 
-        for (String tab : tabs) {
+        // легкий разделитель под вкладками
+        graphics.hLine(x + 3, x + width - 4, y + TAB_HEIGHT, 0x33FFFFFF);
+
+        for (int i = 0; i < tabs.length; i++) {
+            String tab = tabs[i];
+
             int textWidth = this.font.width(tab);
+            int btnW = textWidth + tabPadding * 2;
+            int btnH = TAB_HEIGHT;
+
             boolean isActive = tab.equals(currentTab);
-            int color = isActive ? 0xFFFFFFFF : 0xFFAAAAAA;
+            boolean hovered = mouseX >= tabX && mouseX < tabX + btnW && mouseY >= y && mouseY < y + btnH;
 
-            graphics.drawString(this.font, Component.literal(tab), tabX, y + 4, color, false);
+            drawTab(graphics, tabX, y, btnW, btnH, isActive, hovered);
 
-            if (isActive) {
-                graphics.fill(tabX, y + TAB_HEIGHT - 2, tabX + textWidth, y + TAB_HEIGHT - 1, 0xFFFFFFFF);
+            int textX = tabX + tabPadding;
+            int textY = y + 4;
+            int color = isActive ? 0xFFFFFFFF : 0xFFB0B0B0;
+            graphics.drawString(this.font, Component.literal(tab), textX, textY, color, false);
+
+            // вертикальный разделитель между вкладками (кроме последней)
+            if (i < tabs.length - 1) {
+                int dividerX = tabX + btnW + 2;
+                graphics.setColor(1f, 1f, 1f, animationAlpha);
+                graphics.blit(ChatTextures.TAB_DIVIDER, dividerX, y + 2, 0, 0, 1, TAB_HEIGHT - 4, 1, 16);
+                graphics.setColor(1f, 1f, 1f, 1f);
             }
 
-            tabX += textWidth + tabPadding * 2;
+            tabX += btnW + 4;
+            if (tabX > x + width - 20) break;
         }
     }
 
@@ -280,11 +494,10 @@ public class CustomChatScreen extends ChatScreen {
         int endIndex = Math.max(0, totalLines - scrollOffset);
 
         int currentY = y + height - lineHeight;
-
         for (int i = endIndex - 1; i >= startIndex; i--) {
             if (i < 0 || i >= wrappedLines.size()) break;
-
             FormattedCharSequence line = wrappedLines.get(i);
+
             graphics.drawString(this.font, line, x + 4, currentY, 0xFFFFFFFF, false);
             clickAreas.add(new ClickArea(x + 4, currentY, this.font.width(line), lineHeight, line));
 
@@ -295,12 +508,13 @@ public class CustomChatScreen extends ChatScreen {
         if (totalLines > visibleLines) {
             int scrollBarX = x + width - SCROLLBAR_WIDTH - 2;
             int trackHeight = height;
+
             int scrollH = Math.max(10, (int) ((float) visibleLines / totalLines * trackHeight));
             float scrollP = (float) scrollOffset / (totalLines - visibleLines);
             int scrollY = y + trackHeight - scrollH - (int) (scrollP * (trackHeight - scrollH));
 
-            graphics.fill(scrollBarX, y, scrollBarX + SCROLLBAR_WIDTH, y + trackHeight, 0x44000000);
-            graphics.fill(scrollBarX, scrollY, scrollBarX + SCROLLBAR_WIDTH, scrollY + scrollH, 0xFFAAAAAA);
+            drawScrollTrack(graphics, scrollBarX, y, SCROLLBAR_WIDTH, trackHeight);
+            drawScrollThumb(graphics, scrollBarX, scrollY, SCROLLBAR_WIDTH, scrollH);
         }
     }
 
@@ -334,9 +548,8 @@ public class CustomChatScreen extends ChatScreen {
         if (invalid) {
             cachedWrappedLines.clear();
             for (Component msg : rawMessages) {
-                cachedWrappedLines.addAll(this.font.split(msg, maxTextWidth));
+                cachedWrappedLines.addAll(wrapMessage(msg, maxTextWidth));
             }
-
             cachedRawMessagesRef = rawMessages;
             cachedTab = currentTab;
             cachedMaxTextWidth = maxTextWidth;
@@ -361,7 +574,7 @@ public class CustomChatScreen extends ChatScreen {
     }
 
     private void renderSettingsButton(GuiGraphics graphics, int mouseX, int mouseY, int x, int y) {
-        graphics.drawString(this.font, Component.literal("⚙"), x + 4, y + 3, 0xFFAAAAAA, false);
+        graphics.drawString(this.font, Component.literal("⚙"), x + 4, y + 3, 0xFFB0B0B0, false);
     }
 
     @Override
@@ -378,20 +591,20 @@ public class CustomChatScreen extends ChatScreen {
             return true;
         }
 
-        // 3) Suggestions
-        if (this.customCommandSuggestions != null && this.customCommandSuggestions.mouseClicked(mouseX, mouseY, button)) {
-            return true;
+        // 3) Suggestions (только если клик внутри панели чата)
+        if (isInsideChatPanel(mouseX, mouseY) && this.customCommandSuggestions != null) {
+            if (this.customCommandSuggestions.mouseClicked(mouseX, mouseY, button)) return true;
         }
 
-        int width = ChatConfig.CLIENT.chatWidth.get();
-        int height = ChatConfig.CLIENT.chatHeight.get();
-        int x = 4;
-        int y = this.height - height - 4;
+        int width = chatW();
+        int height = chatH();
+        int x = chatX();
+        int y = chatY();
 
         // Скроллбар: захват перетаскивания
         int scrollBarX = x + width - SCROLLBAR_WIDTH - 2;
         if (mouseX >= scrollBarX - 2 && mouseX <= scrollBarX + SCROLLBAR_WIDTH + 2
-                && mouseY >= y + TAB_HEIGHT && mouseY <= y + height - 16) {
+                && mouseY >= messageTopY(y) && mouseY <= messageBottomY(y, height)) {
             this.isDraggingScrollbar = true;
             updateScroll(mouseY, y, height);
             return true;
@@ -400,6 +613,7 @@ public class CustomChatScreen extends ChatScreen {
         // Клик по "⚙" (пока заглушка)
         if (button == 0) {
             if (mouseX >= x + 4 && mouseX <= x + 12 && mouseY >= y + 3 && mouseY <= y + 11) {
+                Minecraft.getInstance().getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.UI_BUTTON_CLICK, 1.0F));
                 return true;
             }
         }
@@ -407,13 +621,13 @@ public class CustomChatScreen extends ChatScreen {
         // Клик по вкладкам
         if (button == 0) {
             if (mouseY >= y && mouseY < y + TAB_HEIGHT && mouseX >= x && mouseX < x + width) {
-                handleTabClick(mouseX, x, y);
+                handleTabClick(mouseX, mouseY, x, y);
                 return true;
             }
         }
 
         // Клики по области сообщений
-        if (mouseY >= y + TAB_HEIGHT + 2 && mouseY <= y + height - 16) {
+        if (isInsideMessagesArea(mouseX, mouseY)) {
             Style style = getStyleAt(mouseX, mouseY);
 
             // ПКМ: только контекстное меню (и только по /w Nick)
@@ -446,8 +660,8 @@ public class CustomChatScreen extends ChatScreen {
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
         if (this.isDraggingScrollbar) {
-            int height = ChatConfig.CLIENT.chatHeight.get();
-            int y = this.height - height - 4;
+            int height = chatH();
+            int y = chatY();
             updateScroll(mouseY, y, height);
             return true;
         }
@@ -460,7 +674,7 @@ public class CustomChatScreen extends ChatScreen {
         List<Component> rawMessages = chatManager.getMessages(currentTab);
         if (rawMessages == null || rawMessages.isEmpty()) return;
 
-        int width = ChatConfig.CLIENT.chatWidth.get();
+        int width = chatW();
         int maxTextWidth = width - 12 - SCROLLBAR_WIDTH;
 
         // используем тот же кэш, что и отрисовка
@@ -469,8 +683,8 @@ public class CustomChatScreen extends ChatScreen {
         int lineHeight = this.font.lineHeight + 1;
         int visibleLines = messageAreaHeight / lineHeight;
         int totalLines = wrappedLines.size();
-
         int maxScroll = Math.max(0, totalLines - visibleLines);
+
         if (maxScroll <= 0) {
             this.scrollOffset = 0;
             return;
@@ -478,13 +692,14 @@ public class CustomChatScreen extends ChatScreen {
 
         double trackTop = y + TAB_HEIGHT + 2;
         double trackHeight = messageAreaHeight;
-
         double relativeY = mouseY - trackTop;
+
         relativeY = Mth.clamp(relativeY, 0, trackHeight);
 
         double scrollH = Math.max(10, (visibleLines / (float) totalLines) * trackHeight);
         double availableSpace = trackHeight - scrollH;
 
+        // центрируем thumb относительно мыши
         double ratio = (trackHeight - relativeY - (scrollH / 2.0)) / availableSpace;
         ratio = Mth.clamp(ratio, 0, 1);
 
@@ -505,7 +720,7 @@ public class CustomChatScreen extends ChatScreen {
 
     /**
      * Разрешаем контекстное меню ТОЛЬКО если clickEvent — это SUGGEST_COMMAND формата "/w Nick ...".
-     * Все остальные SUGGEST_COMMAND (например "/friend add ..." или "/party invite ...") игнорируются.
+     * Все остальные SUGGEST_COMMAND (например "/friend add ...") игнорируются.
      */
     private String extractNickForContextMenu(ClickEvent event) {
         if (event == null) return null;
@@ -534,12 +749,15 @@ public class CustomChatScreen extends ChatScreen {
         this.input.setValue("/w " + nick + " ");
         this.input.setCursorPosition(this.input.getValue().length());
         this.input.setHighlightPos(this.input.getValue().length());
+
         this.input.setFocused(true);
         this.setFocused(this.input);
 
-        if (this.customCommandSuggestions != null) this.customCommandSuggestions.updateCommandInfo();
-        this.currentContextMenu = null;
+        if (this.customCommandSuggestions != null) {
+            this.customCommandSuggestions.updateCommandInfo();
+        }
 
+        this.currentContextMenu = null;
         invalidateWrappedCache();
     }
 
@@ -565,12 +783,9 @@ public class CustomChatScreen extends ChatScreen {
         this.currentContextMenu = null;
     }
 
-
-
     private void clearPendingItems() {
         pendingItems.clear();
     }
-
 
     private static String newItemId() {
         // Короткий id для токена. Игрок его не видит, потому что плейсхолдеры заменяются только при отправке.
@@ -581,7 +796,13 @@ public class CustomChatScreen extends ChatScreen {
 
     private void onItemInserted(ItemPickerOverlay.InsertedItem inserted) {
         if (inserted == null) return;
-        pendingItems.add(new PendingItem(inserted.start(), inserted.end(), inserted.slotMain(), inserted.placeholder(), newItemId()));
+        pendingItems.add(new PendingItem(
+                inserted.start(),
+                inserted.end(),
+                inserted.slotMain(),
+                inserted.placeholder(),
+                newItemId()
+        ));
     }
 
     /**
@@ -589,9 +810,9 @@ public class CustomChatScreen extends ChatScreen {
      * Если игрок меняет текст внутри плейсхолдера — считаем вложение удалённым.
      */
     private void onInputChanged(String newText) {
-
         if (newText == null) newText = "";
         String oldText = (lastInputValue == null) ? "" : lastInputValue;
+
         if (oldText.equals(newText)) return;
 
         // Найти общий префикс
@@ -614,12 +835,10 @@ public class CustomChatScreen extends ChatScreen {
         int newMidLen = newSuffix - prefix;
         int delta = newMidLen - oldMidLen;
 
-        // ВАЖНО: переменные, используемые в lambda, должны быть effectively final
         final int prefixF = prefix;
         final int oldSuffixF = oldSuffix;
         final int deltaF = delta;
 
-        // Обновляем диапазоны
         if (!pendingItems.isEmpty()) {
             pendingItems.removeIf(p -> {
                 // полностью до изменения
@@ -638,9 +857,7 @@ public class CustomChatScreen extends ChatScreen {
         }
 
         lastInputValue = newText;
-
     }
-
 
     private static final class PreparedOutgoing {
         final String text;
@@ -657,7 +874,6 @@ public class CustomChatScreen extends ChatScreen {
      * Защита: вручную набранный токен [[item:id=...]] не сработает, потому что его id не будет в itemIdToSlot.
      */
     private PreparedOutgoing prepareOutgoingMessage(String rawText) {
-
         if (rawText == null || rawText.isEmpty() || pendingItems.isEmpty()) {
             return new PreparedOutgoing(rawText, Map.of());
         }
@@ -682,57 +898,38 @@ public class CustomChatScreen extends ChatScreen {
         }
 
         return new PreparedOutgoing(out, map);
-
     }
 
-    private String applyPendingItemsToMessage(String rawText) {
-
-        if (rawText == null || rawText.isEmpty()) return rawText;
-        if (pendingItems.isEmpty()) return rawText;
-
-        // С конца, чтобы не ломать индексы
-        pendingItems.sort(Comparator.comparingInt((PendingItem p) -> p.start).reversed());
-
-        String out = rawText;
-
-        for (PendingItem p : pendingItems) {
-            if (p.start < 0 || p.end > out.length() || p.start >= p.end) continue;
-
-            // Доп. защита: заменяем только если под диапазоном всё ещё лежит ожидаемый placeholder
-            String cur = out.substring(p.start, p.end);
-            if (!cur.equals(p.placeholder)) continue;
-
-            String token = "[[item:inv=main,slot=" + p.slotMain + "]]";
-            out = out.substring(0, p.start) + token + out.substring(p.end);
-        }
-
-        return out;
-
-    }
-
-    private void handleTabClick(double mouseX, int x, int y) {
+    private void handleTabClick(double mouseX, double mouseY, int x, int y) {
         String[] tabs = {"Общий", "Торговый", "Личное", "Урон"};
-        int tabX = x + 24;
+
+        int tabX = x + 8;
         int tabPadding = 8;
 
         for (String tab : tabs) {
             int textWidth = this.font.width(tab);
-            if (mouseX >= tabX && mouseX < tabX + textWidth + tabPadding * 2) {
+            int btnW = textWidth + tabPadding * 2;
+            int btnH = TAB_HEIGHT;
+
+            if (mouseX >= tabX && mouseX < tabX + btnW && mouseY >= y && mouseY < y + btnH) {
                 if (!Objects.equals(currentTab, tab)) {
                     this.currentTab = tab;
                     chatManager.setActiveTabName(tab);
                     this.scrollOffset = 0;
-                    this.input.setValue("");
 
+                    this.input.setValue("");
                     clearPendingItems();
                     lastInputValue = this.input.getValue();
 
-                    if (this.customCommandSuggestions != null) this.customCommandSuggestions.updateCommandInfo();
+                    if (this.customCommandSuggestions != null) {
+                        this.customCommandSuggestions.updateCommandInfo();
+                    }
                     invalidateWrappedCache();
                 }
                 break;
             }
-            tabX += textWidth + tabPadding * 2;
+
+            tabX += btnW + 4;
         }
     }
 
@@ -760,17 +957,16 @@ public class CustomChatScreen extends ChatScreen {
             if (!tabHeld) {
                 tabHeld = true;
 
-                int chatWidth = ChatConfig.CLIENT.chatWidth.get();
-                int chatHeight = ChatConfig.CLIENT.chatHeight.get();
-                int chatX = 4;
-                int chatY = this.height - chatHeight - 4;
+                int chatWidth = chatW();
+                int chatHeight = chatH();
+                int chatX = chatX();
+                int chatY = chatY();
 
-                // ВАЖНО: не используем toggle без защиты — иначе авто-repeat клавиши будет мигать.
+                // не используем toggle без защиты — иначе авто-repeat будет мигать
                 if (!itemPicker.isOpen()) {
                     itemPicker.toggle(chatX, chatY, chatWidth, chatHeight, this.width, this.height);
                 }
             }
-
             return true;
         }
 
@@ -792,24 +988,27 @@ public class CustomChatScreen extends ChatScreen {
             }
         }
 
-        // 3) Подсказки команд (обычное поведение, но после обработки TAB сверху)
+        // 3) Подсказки команд
         if (this.customCommandSuggestions != null) {
             if (this.customCommandSuggestions.keyPressed(keyCode, scanCode, modifiers)) {
                 return true;
             }
         }
 
-        // 4) ENTER отправляет сообщение (как было)
+        // 4) ENTER отправляет сообщение
         if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             String text = this.input.getValue().trim();
             if (!text.isEmpty()) {
                 sendMessageByTab(text);
-                this.minecraft.gui.getChat().addRecentChat(text);
-                this.input.setValue("");
 
+                if (this.minecraft != null) {
+                    this.minecraft.gui.getChat().addRecentChat(text);
+                    this.minecraft.setScreen(null);
+                }
+
+                this.input.setValue("");
                 clearPendingItems();
                 lastInputValue = this.input.getValue();
-                this.minecraft.setScreen(null);
                 return true;
             }
         }
@@ -823,13 +1022,12 @@ public class CustomChatScreen extends ChatScreen {
         if (keyCode == GLFW.GLFW_KEY_TAB) {
             if (tabHeld) {
                 tabHeld = false;
+                if (itemPicker.isOpen()) {
+                    itemPicker.close();
+                }
+                return true;
             }
-            if (itemPicker.isOpen()) {
-                itemPicker.close();
-            }
-            return true;
         }
-
         return super.keyReleased(keyCode, scanCode, modifiers);
     }
 
@@ -854,13 +1052,12 @@ public class CustomChatScreen extends ChatScreen {
             return;
         }
 
-        // "Торговый": добавляем префикс, если не команда
+        // "Торговый"
         if ("Торговый".equals(currentTab)) {
             if (text.startsWith("/")) {
                 this.minecraft.getConnection().sendCommand(text.substring(1));
             } else {
                 PreparedOutgoing po = prepareOutgoingMessage(text);
-
                 NetworkHandler.CHANNEL.sendToServer(new ChatMessagePacket(po.text, ChannelType.TRADE, po.itemIdToSlot));
             }
             return;
@@ -871,19 +1068,57 @@ public class CustomChatScreen extends ChatScreen {
             this.minecraft.getConnection().sendCommand(text.substring(1));
         } else {
             PreparedOutgoing po = prepareOutgoingMessage(text);
-
             NetworkHandler.CHANNEL.sendToServer(new ChatMessagePacket(po.text, ChannelType.ALL, po.itemIdToSlot));
         }
     }
 
+    // ---------------------------
+    // ИЗМЕНЕНИЕ: скролл подсказок
+    // ---------------------------
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        if (delta != 0) {
+        // 1) Сначала отдаём колёсико подсказкам команд
+        if (delta != 0 && this.customCommandSuggestions != null && isInsideChatPanel(mouseX, mouseY)) {
+            if (invokeCommandSuggestionsMouseScrolled(this.customCommandSuggestions, mouseX, mouseY, delta)) {
+                return true;
+            }
+        }
+
+        // 2) Затем скроллим чат (только если курсор в зоне сообщений)
+        if (delta != 0 && isInsideMessagesArea(mouseX, mouseY)) {
             this.scrollOffset += (delta > 0) ? 1 : -1;
             if (this.scrollOffset < 0) this.scrollOffset = 0;
             return true;
         }
+
         return super.mouseScrolled(mouseX, mouseY, delta);
+    }
+
+    /**
+     * Безопасный вызов CommandSuggestions#mouseScrolled для разных маппингов:
+     * - mouseScrolled(double mouseX, double mouseY, double delta)
+     * - mouseScrolled(double delta)
+     */
+    private static boolean invokeCommandSuggestionsMouseScrolled(CommandSuggestions cs, double mouseX, double mouseY, double delta) {
+        try {
+            // вариант: (double, double, double)
+            Method m = cs.getClass().getMethod("mouseScrolled", double.class, double.class, double.class);
+            Object r = m.invoke(cs, mouseX, mouseY, delta);
+            return (r instanceof Boolean) && (Boolean) r;
+        } catch (NoSuchMethodException ignored) {
+            // fallback ниже
+        } catch (Throwable t) {
+            return false;
+        }
+
+        try {
+            // вариант: (double)
+            Method m = cs.getClass().getMethod("mouseScrolled", double.class);
+            Object r = m.invoke(cs, delta);
+            return (r instanceof Boolean) && (Boolean) r;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static class ClickArea {
@@ -927,37 +1162,40 @@ public class CustomChatScreen extends ChatScreen {
 
             int totalHeight = buttons.size() * buttonHeight + 14;
             int screenHeight = Minecraft.getInstance().getWindow().getGuiScaledHeight();
-            int yCandidate = mouseY;
 
+            int yCandidate = mouseY;
             if (yCandidate + totalHeight > screenHeight) {
                 yCandidate = mouseY - totalHeight;
             }
-
             this.renderY = Math.max(0, yCandidate);
         }
 
-        public void render(GuiGraphics graphics, int mouseX, int mouseY, net.minecraft.client.gui.Font font) {
+        public void render(GuiGraphics graphics, int mouseX, int mouseY, Font font) {
             // рисуем меню на повышенном Z-слое
             graphics.pose().pushPose();
             graphics.pose().translate(0.0D, 0.0D, 500.0D);
 
             int height = buttons.size() * buttonHeight + 14;
 
-            graphics.fill(x, renderY, x + width, renderY + height, 0xFF000000);
-            graphics.renderOutline(x, renderY, width, height, 0xFFFFFFFF);
+            // фон меню
+            graphics.setColor(1f, 1f, 1f, 1.0f);
+            ChatNineSlice.blit9(graphics, ChatTextures.CONTEXT_9, x, renderY, width, height, 8, 32, 32);
 
-            graphics.drawCenteredString(font, Component.literal(targetNick), x + width / 2, renderY + 3, 0xFFFFFF00);
-            graphics.fill(x, renderY + 13, x + width, renderY + 14, 0xFF555555);
+            // заголовок
+            graphics.drawCenteredString(font, Component.literal(targetNick), x + width / 2, renderY + 3, 0xFFFFFF55);
+            graphics.hLine(x + 4, x + width - 5, renderY + 13, 0x55FFFFFF);
 
             int currentY = renderY + 14;
+
             for (ContextButton btn : buttons) {
                 boolean hovered = mouseX >= x && mouseX < x + width
                         && mouseY >= currentY && mouseY < currentY + buttonHeight;
 
-                int bgColor = hovered ? 0xFF444444 : 0x00000000;
-                graphics.fill(x + 1, currentY, x + width - 1, currentY + buttonHeight, bgColor);
-                graphics.drawString(font, btn.text, x + 5, currentY + 3, 0xFFFFFFFF, false);
+                if (hovered) {
+                    graphics.fill(x + 2, currentY, x + width - 2, currentY + buttonHeight, 0x3300E5FF);
+                }
 
+                graphics.drawString(font, btn.text, x + 6, currentY + 3, 0xFFFFFFFF, false);
                 currentY += buttonHeight;
             }
 
