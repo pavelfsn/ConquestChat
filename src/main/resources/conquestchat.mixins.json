@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.conquest.chat.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "conquestchat.refmap.json",
+  "client": [
+    "client.MixinChatComponent"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

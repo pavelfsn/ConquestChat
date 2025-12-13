@@ -10,6 +10,7 @@ import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 import net.minecraft.network.chat.contents.LiteralContents;
 import net.minecraft.network.chat.contents.TranslatableContents;
+import com.conquest.chat.client.ChatTabLogger;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -258,6 +259,7 @@ public class ClientChatManager {
         if (!list.isEmpty() && list.get(list.size() - 1) == msg) return;
 
         list.add(msg);
+        ChatTabLogger.get().append(tabName, msg);
         if (list.size() > MAX_HISTORY) list.remove(0);
 
         // HUD: сохраняем сообщения ПО ВКЛАДКЕ (для фильтрации по activeTabName)

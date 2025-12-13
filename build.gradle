@@ -3,6 +3,7 @@ plugins {
     id 'idea'
     id 'maven-publish'
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'org.spongepowered.mixin' version '0.7.+'
 }
 
 version = '1.0.0'
@@ -14,14 +15,24 @@ base {
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
+repositories {
+    maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+}
+
 minecraft {
     mappings channel: 'official', version: '1.20.1'
 
     runs {
         client {
             workingDirectory project.file('run')
+
             property 'forge.logging.markers', 'REGISTRIES'
             property 'forge.logging.console.level', 'debug'
+
+            // Для remap refmap в dev-среде FG
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+
             mods {
                 conquestchat {
                     source sourceSets.main
@@ -31,8 +42,10 @@ minecraft {
 
         server {
             workingDirectory project.file('run')
+
             property 'forge.logging.markers', 'REGISTRIES'
             property 'forge.logging.console.level', 'debug'
+
             mods {
                 conquestchat {
                     source sourceSets.main
@@ -44,6 +57,22 @@ minecraft {
 
 dependencies {
     minecraft 'net.minecraftforge:forge:1.20.1-47.4.10'
+
+    // Нужен только для генерации refmap на компиляции
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+}
+
+mixin {
+    add sourceSets.main, "conquestchat.refmap.json"
+    config "conquestchat.mixins.json"
+}
+
+jar {
+    manifest {
+        attributes([
+                "MixinConfigs": "conquestchat.mixins.json"
+        ])
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
