@@ -1,57 +1,87 @@
 package com.conquest.chat.client;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.tooltip.TooltipComponent;
+import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+
+import java.util.function.Consumer;
 
 public final class ItemPickerOverlay {
+
     private static final int SLOT = 18; // размер слота (ванильный)
     private static final int PADDING = 6;
-
     private boolean open;
     private int selected = 0;
-
     private int x, y, w, h;
-
     private final List<Entry> entries = new ArrayList<>();
 
+    // Tooltip cache (как в твоей исходной версии)
+    private ItemStack cachedTooltipStack = ItemStack.EMPTY;
+    private List<Component> cachedTooltipLines = List.of();
+    private Optional<TooltipComponent> cachedTooltipImage = Optional.empty();
+
     public record Entry(int slotMain, ItemStack stack) {}
+
+    /**
+     * Информация о вставке предмета в input (диапазон в текущей строке + слот).
+     * Метаданные живут отдельно от текста, никаких скрытых символов в строке нет.
+     */
+    public record InsertedItem(int start, int end, int slotMain, String placeholder) {}
+
+    private Consumer<InsertedItem> onInsert = null;
+
+    public void setOnInsert(Consumer<InsertedItem> onInsert) {
+        this.onInsert = onInsert;
+    }
+
 
     public boolean isOpen() {
         return open;
     }
 
-    public void toggle(int chatX, int chatY, int chatW, int chatH, int screenW, int screenH) {
-        open = !open;
+    public void open(int chatX, int chatY, int chatW, int chatH, int screenW, int screenH) {
         if (open) {
-            rebuild();
-            selected = Mth.clamp(selected, 0, Math.max(0, entries.size() - 1));
             layout(chatX, chatY, chatW, chatH, screenW, screenH);
+            return;
+        }
+
+        open = true;
+        rebuild();
+        selected = Mth.clamp(selected, 0, Math.max(0, entries.size() - 1));
+        layout(chatX, chatY, chatW, chatH, screenW, screenH);
+        resetTooltipCache();
+    }
+
+    public void toggle(int chatX, int chatY, int chatW, int chatH, int screenW, int screenH) {
+        if (open) {
+            close();
+        } else {
+            open(chatX, chatY, chatW, chatH, screenW, screenH);
         }
     }
 
     public void close() {
         open = false;
+        resetTooltipCache();
     }
 
     public void layout(int chatX, int chatY, int chatW, int chatH, int screenW, int screenH) {
-        // как в концепте: справа от окна чата
         int desiredW = 176;
         int desiredH = 110;
 
         int px = chatX + chatW + 10;
         int py = chatY;
 
-        // clamp по экрану
         px = Math.min(px, screenW - desiredW - 4);
         py = Math.max(4, Math.min(py, screenH - desiredH - 4));
 
@@ -63,13 +93,10 @@ public final class ItemPickerOverlay {
 
     public void rebuild() {
         entries.clear();
-
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) return;
 
         Inventory inv = mc.player.getInventory();
-
-        // MAIN: 0..35 (включая хотбар 0..8)
         for (int i = 0; i < inv.items.size(); i++) {
             ItemStack st = inv.items.get(i);
             if (st.isEmpty()) continue;
@@ -80,26 +107,25 @@ public final class ItemPickerOverlay {
     public boolean keyPressed(int keyCode) {
         if (!open) return false;
 
-        // стрелки
-        switch (keyCode) {
+        return switch (keyCode) {
             case 263 -> { // LEFT
                 move(-1);
-                return true;
+                yield true;
             }
             case 262 -> { // RIGHT
                 move(+1);
-                return true;
+                yield true;
             }
             case 265 -> { // UP
                 move(-9);
-                return true;
+                yield true;
             }
             case 264 -> { // DOWN
                 move(+9);
-                return true;
+                yield true;
             }
-        }
-        return false;
+            default -> false;
+        };
     }
 
     private void move(int delta) {
@@ -126,13 +152,12 @@ public final class ItemPickerOverlay {
         int gridY = y + PADDING;
         int cols = 9;
         int rows = 4;
-
         int gridW = cols * SLOT;
         int gridH = rows * SLOT;
 
         if (mouseX >= gridX && mouseX < gridX + gridW && mouseY >= gridY && mouseY < gridY + gridH) {
-            int cx = (int)((mouseX - gridX) / SLOT);
-            int cy = (int)((mouseY - gridY) / SLOT);
+            int cx = (int) ((mouseX - gridX) / SLOT);
+            int cy = (int) ((mouseY - gridY) / SLOT);
             int idx = cy * cols + cx;
 
             if (idx >= 0 && idx < entries.size()) {
@@ -148,24 +173,34 @@ public final class ItemPickerOverlay {
     }
 
     public void insertSelected(EditBox input) {
+
         if (!open || entries.isEmpty()) return;
 
         Entry e = entries.get(selected);
 
-        // токен, который потом обработает сервер (следующий этап)
-        String token = "[[item:inv=main,slot=" + e.slotMain() + "]]";
+        String shownName = e.stack().getHoverName().getString();
+        String placeholder = "[" + shownName + "]";
 
         String cur = input.getValue();
         int caret = input.getCursorPosition();
-        String out = cur.substring(0, caret) + token + cur.substring(caret);
+
+        String out = cur.substring(0, caret) + placeholder + cur.substring(caret);
 
         input.setValue(out);
-        input.setCursorPosition(caret + token.length());
+        input.setCursorPosition(caret + placeholder.length());
         input.setHighlightPos(input.getCursorPosition());
+
+        // Сообщаем экрану диапазон вставки, чтобы он вёл метаданные отдельно от текста.
+        if (onInsert != null) {
+            onInsert.accept(new InsertedItem(caret, caret + placeholder.length(), e.slotMain(), placeholder));
+        }
+
     }
 
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
         if (!open) return;
+
+        Minecraft mc = Minecraft.getInstance();
 
         // фон
         g.fill(x, y, x + w, y + h, 0xAA000000);
@@ -177,7 +212,9 @@ public final class ItemPickerOverlay {
         int cols = 9;
         int rows = 4;
 
-        // слоты
+        int hoveredIndex = -1;
+        ItemStack hoveredStack = ItemStack.EMPTY;
+
         for (int i = 0; i < cols * rows; i++) {
             int sx = gridX + (i % cols) * SLOT;
             int sy = gridY + (i / cols) * SLOT;
@@ -189,13 +226,19 @@ public final class ItemPickerOverlay {
             if (i < entries.size()) {
                 ItemStack st = entries.get(i).stack();
                 g.renderItem(st, sx + 1, sy + 1);
-                g.renderItemDecorations(Minecraft.getInstance().font, st, sx + 1, sy + 1);
+                g.renderItemDecorations(mc.font, st, sx + 1, sy + 1);
 
-                // hover как в инвентаре (локально)
                 if (mouseX >= sx && mouseX < sx + SLOT && mouseY >= sy && mouseY < sy + SLOT) {
-                    g.renderTooltip(Minecraft.getInstance().font, Screen.getTooltipFromItem(Minecraft.getInstance(), st), st.getTooltipImage(), mouseX, mouseY);
+                    hoveredIndex = i;
+                    hoveredStack = st;
                 }
             }
+        }
+
+        // Tooltip
+        if (hoveredIndex >= 0 && !hoveredStack.isEmpty()) {
+            updateTooltipCache(mc, hoveredStack);
+            g.renderTooltip(mc.font, cachedTooltipLines, cachedTooltipImage, mouseX, mouseY);
         }
 
         // кнопка
@@ -203,9 +246,22 @@ public final class ItemPickerOverlay {
         int btnY0 = y + h - 22;
         int btnX1 = x + w - PADDING;
         int btnY1 = y + h - 6;
-
         g.fill(btnX0, btnY0, btnX1, btnY1, 0xFF222222);
         g.renderOutline(btnX0, btnY0, btnX1 - btnX0, btnY1 - btnY0, 0x55FFFFFF);
-        g.drawCenteredString(Minecraft.getInstance().font, Component.literal("Прикрепить предмет"), (btnX0 + btnX1) / 2, btnY0 + 6, 0xFFFFFFFF);
+        g.drawCenteredString(mc.font, Component.literal("Прикрепить предмет"), (btnX0 + btnX1) / 2, btnY0 + 6, 0xFFFFFFFF);
+    }
+
+    private void resetTooltipCache() {
+        cachedTooltipStack = ItemStack.EMPTY;
+        cachedTooltipLines = List.of();
+        cachedTooltipImage = Optional.empty();
+    }
+
+    private void updateTooltipCache(Minecraft mc, ItemStack hovered) {
+        if (cachedTooltipStack.isEmpty() || !ItemStack.isSameItemSameTags(hovered, cachedTooltipStack)) {
+            cachedTooltipStack = hovered.copy();
+            cachedTooltipLines = Screen.getTooltipFromItem(mc, hovered);
+            cachedTooltipImage = hovered.getTooltipImage();
+        }
     }
 }

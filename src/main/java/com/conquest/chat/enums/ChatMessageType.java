@@ -2,7 +2,7 @@ package com.conquest.chat.enums;
 
 public enum ChatMessageType {
     GLOBAL,
-    LOCAL,
+    COMBAT,
     TRADE,
     SYSTEM, // <--- Есть
     PRIVATE, // <--- Есть

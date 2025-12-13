@@ -10,8 +10,10 @@ import java.util.List;
 import java.util.UUID;
 
 public class ChatChannel {
+
     private final ChannelType type;
     private final List<ChatMessage> messages;
+
     private static final int MAX_MESSAGES = 100;
 
     public ChatChannel(ChannelType type) {
@@ -19,11 +21,17 @@ public class ChatChannel {
         this.messages = new ArrayList<>();
     }
 
+    // Старый API оставляем для совместимости
     public void addMessage(ServerPlayer sender, String message) {
+        addMessage(sender, Component.literal(message).withStyle(ChatFormatting.WHITE));
+    }
+
+    // Новый API: храним уже готовый Component (в т.ч. с hover на предметы)
+    public void addMessage(ServerPlayer sender, Component messageComponent) {
         ChatMessage chatMessage = new ChatMessage(
                 sender.getUUID(),
                 sender.getName().getString(),
-                message,
+                messageComponent,
                 type,
                 System.currentTimeMillis()
         );
@@ -37,10 +45,14 @@ public class ChatChannel {
     }
 
     public void addSystemMessage(String message) {
+        addSystemMessage(Component.literal(message).withStyle(ChatFormatting.WHITE));
+    }
+
+    public void addSystemMessage(Component messageComponent) {
         ChatMessage chatMessage = new ChatMessage(
                 null,
                 "СИСТЕМА",
-                message,
+                messageComponent,
                 type,
                 System.currentTimeMillis()
         );
@@ -61,13 +73,14 @@ public class ChatChannel {
     }
 
     public static class ChatMessage {
+
         private final UUID senderId;
         private final String senderName;
-        private final String message;
+        private final Component message;
         private final ChannelType channel;
         private final long timestamp;
 
-        public ChatMessage(UUID senderId, String senderName, String message, ChannelType channel, long timestamp) {
+        public ChatMessage(UUID senderId, String senderName, Component message, ChannelType channel, long timestamp) {
             this.senderId = senderId;
             this.senderName = senderName;
             this.message = message;
@@ -86,8 +99,8 @@ public class ChatChannel {
                 component.append(Component.literal(senderName + ": ").withStyle(channel.getColor()));
             }
 
-            // Само сообщение
-            component.append(Component.literal(message).withStyle(ChatFormatting.WHITE));
+            // Само сообщение (уже может содержать hover на предметы)
+            component.append(message);
 
             return component;
         }
@@ -100,8 +113,13 @@ public class ChatChannel {
             return senderName;
         }
 
-        public String getMessage() {
+        public Component getMessageComponent() {
             return message;
+        }
+
+        // Для совместимости/логов
+        public String getMessage() {
+            return message.getString();
         }
 
         public ChannelType getChannel() {

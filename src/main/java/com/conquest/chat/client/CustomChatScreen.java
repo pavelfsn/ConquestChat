@@ -1,4 +1,3 @@
-// File: src/main/java/com/conquest/chat/client/CustomChatScreen.java
 package com.conquest.chat.client;
 
 import com.conquest.chat.ConquestChatMod;
@@ -23,7 +22,15 @@ import org.lwjgl.glfw.GLFW;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+
+import java.util.Comparator;
 import java.util.regex.Pattern;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import com.conquest.chat.channel.ChannelType;
+import com.conquest.chat.network.ChatMessagePacket;
+import com.conquest.chat.network.NetworkHandler;
 
 @OnlyIn(Dist.CLIENT)
 public class CustomChatScreen extends ChatScreen {
@@ -51,6 +58,33 @@ public class CustomChatScreen extends ChatScreen {
 
     // --- ITEM PICKER ---
     private final ItemPickerOverlay itemPicker = new ItemPickerOverlay();
+
+    // ---------------------------
+    // Двухслойный ввод предметов
+    // ---------------------------
+
+    private static final class PendingItem {
+        int start;
+        int end;
+        final int slotMain;
+        final String placeholder;
+        final String id;
+
+        PendingItem(int start, int end, int slotMain, String placeholder, String id) {
+            this.start = start;
+            this.end = end;
+            this.slotMain = slotMain;
+            this.placeholder = placeholder;
+            this.id = id;
+        }
+    }
+
+    private final List<PendingItem> pendingItems = new ArrayList<>();
+    private String lastInputValue = "";
+
+
+    // TAB hold state (чтобы TAB работал по удержанию, а не как toggle)
+    private boolean tabHeld = false;
 
     // ==========================
     // FPS/GC: layout cache
@@ -107,11 +141,22 @@ public class CustomChatScreen extends ChatScreen {
         this.customCommandSuggestions.setAllowSuggestions(true);
         this.customCommandSuggestions.updateCommandInfo();
 
+        // Hook: item-picker сообщает о вставке диапазона в input
+        this.itemPicker.setOnInsert(this::onItemInserted);
+
+
         this.input.setResponder((text) -> {
+
+            // Поддерживаем привязанные диапазоны предметов
+            onInputChanged(text);
+
             if (this.customCommandSuggestions != null) {
                 this.customCommandSuggestions.updateCommandInfo();
             }
+
         });
+
+        lastInputValue = this.input.getValue();
 
         invalidateWrappedCache();
     }
@@ -520,6 +565,151 @@ public class CustomChatScreen extends ChatScreen {
         this.currentContextMenu = null;
     }
 
+
+
+    private void clearPendingItems() {
+        pendingItems.clear();
+    }
+
+
+    private static String newItemId() {
+        // Короткий id для токена. Игрок его не видит, потому что плейсхолдеры заменяются только при отправке.
+        long v = ThreadLocalRandom.current().nextLong();
+        if (v == 0L) v = 1L;
+        return Long.toUnsignedString(v, 36);
+    }
+
+    private void onItemInserted(ItemPickerOverlay.InsertedItem inserted) {
+        if (inserted == null) return;
+        pendingItems.add(new PendingItem(inserted.start(), inserted.end(), inserted.slotMain(), inserted.placeholder(), newItemId()));
+    }
+
+    /**
+     * Поддерживаем PendingItem диапазоны при любом редактировании инпута.
+     * Если игрок меняет текст внутри плейсхолдера — считаем вложение удалённым.
+     */
+    private void onInputChanged(String newText) {
+
+        if (newText == null) newText = "";
+        String oldText = (lastInputValue == null) ? "" : lastInputValue;
+        if (oldText.equals(newText)) return;
+
+        // Найти общий префикс
+        int prefix = 0;
+        int min = Math.min(oldText.length(), newText.length());
+        while (prefix < min && oldText.charAt(prefix) == newText.charAt(prefix)) {
+            prefix++;
+        }
+
+        // Найти общий суффикс
+        int oldSuffix = oldText.length();
+        int newSuffix = newText.length();
+        while (oldSuffix > prefix && newSuffix > prefix
+                && oldText.charAt(oldSuffix - 1) == newText.charAt(newSuffix - 1)) {
+            oldSuffix--;
+            newSuffix--;
+        }
+
+        int oldMidLen = oldSuffix - prefix;
+        int newMidLen = newSuffix - prefix;
+        int delta = newMidLen - oldMidLen;
+
+        // ВАЖНО: переменные, используемые в lambda, должны быть effectively final
+        final int prefixF = prefix;
+        final int oldSuffixF = oldSuffix;
+        final int deltaF = delta;
+
+        // Обновляем диапазоны
+        if (!pendingItems.isEmpty()) {
+            pendingItems.removeIf(p -> {
+                // полностью до изменения
+                if (p.end <= prefixF) {
+                    return false;
+                }
+                // полностью после изменения
+                if (p.start >= oldSuffixF) {
+                    p.start += deltaF;
+                    p.end += deltaF;
+                    return false;
+                }
+                // пересечение => плейсхолдер испорчен/изменён
+                return true;
+            });
+        }
+
+        lastInputValue = newText;
+
+    }
+
+
+    private static final class PreparedOutgoing {
+        final String text;
+        final Map<String, Integer> itemIdToSlot;
+
+        PreparedOutgoing(String text, Map<String, Integer> itemIdToSlot) {
+            this.text = text;
+            this.itemIdToSlot = itemIdToSlot;
+        }
+    }
+
+    /**
+     * Подменяем только те плейсхолдеры, которые реально были вставлены ItemPicker'ом.
+     * Защита: вручную набранный токен [[item:id=...]] не сработает, потому что его id не будет в itemIdToSlot.
+     */
+    private PreparedOutgoing prepareOutgoingMessage(String rawText) {
+
+        if (rawText == null || rawText.isEmpty() || pendingItems.isEmpty()) {
+            return new PreparedOutgoing(rawText, Map.of());
+        }
+
+        // С конца, чтобы не ломать индексы
+        pendingItems.sort(Comparator.comparingInt((PendingItem p) -> p.start).reversed());
+
+        String out = rawText;
+        Map<String, Integer> map = new HashMap<>();
+
+        for (PendingItem p : pendingItems) {
+            if (p.start < 0 || p.end > out.length() || p.start >= p.end) continue;
+
+            // Доп. защита: заменяем только если под диапазоном всё ещё лежит ожидаемый placeholder
+            String cur = out.substring(p.start, p.end);
+            if (!cur.equals(p.placeholder)) continue;
+
+            String token = "[[item:id=" + p.id + "]]";
+            out = out.substring(0, p.start) + token + out.substring(p.end);
+
+            map.put(p.id, p.slotMain);
+        }
+
+        return new PreparedOutgoing(out, map);
+
+    }
+
+    private String applyPendingItemsToMessage(String rawText) {
+
+        if (rawText == null || rawText.isEmpty()) return rawText;
+        if (pendingItems.isEmpty()) return rawText;
+
+        // С конца, чтобы не ломать индексы
+        pendingItems.sort(Comparator.comparingInt((PendingItem p) -> p.start).reversed());
+
+        String out = rawText;
+
+        for (PendingItem p : pendingItems) {
+            if (p.start < 0 || p.end > out.length() || p.start >= p.end) continue;
+
+            // Доп. защита: заменяем только если под диапазоном всё ещё лежит ожидаемый placeholder
+            String cur = out.substring(p.start, p.end);
+            if (!cur.equals(p.placeholder)) continue;
+
+            String token = "[[item:inv=main,slot=" + p.slotMain + "]]";
+            out = out.substring(0, p.start) + token + out.substring(p.end);
+        }
+
+        return out;
+
+    }
+
     private void handleTabClick(double mouseX, int x, int y) {
         String[] tabs = {"Общий", "Торговый", "Личное", "Урон"};
         int tabX = x + 24;
@@ -533,6 +723,9 @@ public class CustomChatScreen extends ChatScreen {
                     chatManager.setActiveTabName(tab);
                     this.scrollOffset = 0;
                     this.input.setValue("");
+
+                    clearPendingItems();
+                    lastInputValue = this.input.getValue();
 
                     if (this.customCommandSuggestions != null) this.customCommandSuggestions.updateCommandInfo();
                     invalidateWrappedCache();
@@ -563,13 +756,21 @@ public class CustomChatScreen extends ChatScreen {
                 return true;
             }
 
-            // TAB => открыть/закрыть меню предметов
-            int chatWidth = ChatConfig.CLIENT.chatWidth.get();
-            int chatHeight = ChatConfig.CLIENT.chatHeight.get();
-            int chatX = 4;
-            int chatY = this.height - chatHeight - 4;
+            // TAB hold: открыть item-picker на нажатии, закрыть на отпускании (см. keyReleased)
+            if (!tabHeld) {
+                tabHeld = true;
 
-            itemPicker.toggle(chatX, chatY, chatWidth, chatHeight, this.width, this.height);
+                int chatWidth = ChatConfig.CLIENT.chatWidth.get();
+                int chatHeight = ChatConfig.CLIENT.chatHeight.get();
+                int chatX = 4;
+                int chatY = this.height - chatHeight - 4;
+
+                // ВАЖНО: не используем toggle без защиты — иначе авто-repeat клавиши будет мигать.
+                if (!itemPicker.isOpen()) {
+                    itemPicker.toggle(chatX, chatY, chatWidth, chatHeight, this.width, this.height);
+                }
+            }
+
             return true;
         }
 
@@ -577,6 +778,7 @@ public class CustomChatScreen extends ChatScreen {
         if (itemPicker.isOpen()) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
                 itemPicker.close();
+                tabHeld = false; // на случай, если игрок нажал ESC не отпуская TAB
                 return true;
             }
 
@@ -604,12 +806,31 @@ public class CustomChatScreen extends ChatScreen {
                 sendMessageByTab(text);
                 this.minecraft.gui.getChat().addRecentChat(text);
                 this.input.setValue("");
+
+                clearPendingItems();
+                lastInputValue = this.input.getValue();
                 this.minecraft.setScreen(null);
                 return true;
             }
         }
 
         return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    @Override
+    public boolean keyReleased(int keyCode, int scanCode, int modifiers) {
+        // TAB hold: закрываем item-picker при отпускании TAB
+        if (keyCode == GLFW.GLFW_KEY_TAB) {
+            if (tabHeld) {
+                tabHeld = false;
+            }
+            if (itemPicker.isOpen()) {
+                itemPicker.close();
+            }
+            return true;
+        }
+
+        return super.keyReleased(keyCode, scanCode, modifiers);
     }
 
     private void sendMessageByTab(String text) {
@@ -638,7 +859,9 @@ public class CustomChatScreen extends ChatScreen {
             if (text.startsWith("/")) {
                 this.minecraft.getConnection().sendCommand(text.substring(1));
             } else {
-                this.minecraft.getConnection().sendChat("[Торг] " + text);
+                PreparedOutgoing po = prepareOutgoingMessage(text);
+
+                NetworkHandler.CHANNEL.sendToServer(new ChatMessagePacket(po.text, ChannelType.TRADE, po.itemIdToSlot));
             }
             return;
         }
@@ -647,7 +870,9 @@ public class CustomChatScreen extends ChatScreen {
         if (text.startsWith("/")) {
             this.minecraft.getConnection().sendCommand(text.substring(1));
         } else {
-            this.minecraft.getConnection().sendChat(text);
+            PreparedOutgoing po = prepareOutgoingMessage(text);
+
+            NetworkHandler.CHANNEL.sendToServer(new ChatMessagePacket(po.text, ChannelType.ALL, po.itemIdToSlot));
         }
     }
 

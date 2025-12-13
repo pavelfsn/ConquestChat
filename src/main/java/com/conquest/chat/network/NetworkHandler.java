@@ -6,7 +6,8 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class NetworkHandler {
-    private static final String PROTOCOL_VERSION = "1";
+
+    private static final String PROTOCOL_VERSION = "2";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(ConquestChatMod.MOD_ID, "main"),
@@ -31,5 +32,12 @@ public class NetworkHandler {
                 ChannelSyncPacket::encode,
                 ChannelSyncPacket::decode,
                 ChannelSyncPacket::handle);
+
+        // ChatMessagePacket (Клиент -> Сервер)
+        CHANNEL.registerMessage(id++,
+                ChatMessagePacket.class,
+                ChatMessagePacket::toBytes,
+                ChatMessagePacket::new,
+                ChatMessagePacket::handle);
     }
 }
